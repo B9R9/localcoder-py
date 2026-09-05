@@ -1,0 +1,18 @@
+[project]
+name = "localcoder"
+version = "0.1.0"
+description = "Minimal local coding agent for Ollama — explicit context, zero bloat."
+requires-python = ">=3.10"
+dependencies = [
+    "prompt_toolkit>=3.0.36",
+]
+
+[project.scripts]
+localcoder = "localcoder.repl:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["localcoder*"]

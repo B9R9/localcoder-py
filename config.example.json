@@ -1,0 +1,9 @@
+{
+  "host": "http://localhost:11434",
+  "model": "devstral-small-2",
+  "num_ctx": 8192,
+  "temperature": 0.2,
+  "auto_approve": false,
+  "context": ["README.md", "docs/adr/*.md"],
+  "role": null
+}
