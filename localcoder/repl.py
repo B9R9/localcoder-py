@@ -52,7 +52,7 @@ from localcoder.sessions import list_sessions, load_session, save_session
 from localcoder.skills import create_skill, format_skill, list_skills, load_skill
 from localcoder.symbols import find_definition, find_references
 from localcoder.terminal import TerminalError, argv_with_session, open_new_terminal
-from localcoder.tools import execute_tool, get_tools, needs_confirmation
+from localcoder.tools import TOOL_NAMES, execute_tool, get_tools, needs_confirmation
 
 # Deliberately short — every extra sentence here is tokens on every request.
 SYSTEM_PROMPT = (
@@ -85,6 +85,19 @@ _AT_MENTION = re.compile(r"@([^\s@]+)")
 # cancels. Works identically whether stdin is a pipe or a real terminal.
 _CAPTURE_SAVE = "."
 _CAPTURE_CANCEL = "!"
+
+# Some smaller/weaker models don't reliably use Ollama's native tool-calling
+# and instead hallucinate the tool-call JSON shape directly into `content` —
+# which then just prints as a normal reply, silently, with nothing actually
+# executed. Recognize that shape so run_turn can warn instead of pretending
+# the turn succeeded.
+_FAKE_TOOL_CALL = re.compile(
+    r'\{\s*"name"\s*:\s*"(?:' + "|".join(re.escape(n) for n in TOOL_NAMES) + r')"\s*,\s*"arguments"\s*:'
+)
+
+
+def _looks_like_untriggered_tool_call(content: str) -> bool:
+    return bool(content) and bool(_FAKE_TOOL_CALL.search(content))
 
 
 class OutputSink:
@@ -354,6 +367,12 @@ class App:
 
             tool_calls = result.get("tool_calls")
             if not tool_calls:
+                if _looks_like_untriggered_tool_call(result["content"]):
+                    self.out.warn(
+                        f"[localcoder] {self.config.model} tried to call a tool as plain text instead of "
+                        "using real tool-calling — nothing was executed. This model may not reliably "
+                        "support tool-calling; try /model use to switch to one that does."
+                    )
                 self.conversation.append({"role": "assistant", "content": result["content"]})
                 return
 
