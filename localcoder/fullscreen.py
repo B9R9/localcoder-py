@@ -182,6 +182,9 @@ class BufferSink(OutputSink):
     def tool_call(self, name: str, args: dict) -> None:
         self.screen.append_raw(f"\n{ui.tool_call_fragment(name, args)}")
 
+    def tool_result(self, result: dict) -> None:
+        self.screen.append_raw(ui.tool_result_fragment(result))
+
     def verbose_stats(self, meta: dict) -> None:
         for fragment in ui.verbose_stats_fragments(meta):
             self.screen.append_raw(fragment + "\n")

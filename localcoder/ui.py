@@ -184,6 +184,22 @@ def tool_call_fragment(name: str, args: dict) -> str:
     return f"<tool>[tool] <tool.name>{_esc(name)}</tool.name>({_esc(rendered)})</tool>"
 
 
+# Kept short — this is a live progress indicator, not the full tool output
+# the model itself sees (that one goes into the conversation untruncated by
+# this cap; tools.py's own MAX_OUTPUT_CHARS already keeps it reasonable).
+_TOOL_RESULT_PREVIEW_CHARS = 300
+
+
+def tool_result_fragment(result: dict) -> str:
+    try:
+        rendered = json.dumps(result)
+    except (TypeError, ValueError):
+        rendered = str(result)
+    if len(rendered) > _TOOL_RESULT_PREVIEW_CHARS:
+        rendered = rendered[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
+    return f"<dim>  → {_esc(rendered)}</dim>"
+
+
 def info_fragment(text: str) -> str:
     return f"<dim>{_esc(text)}</dim>"
 
@@ -355,6 +371,10 @@ def user_separator() -> None:
 
 def tool_call(name: str, args: dict) -> None:
     _print(f"\n{tool_call_fragment(name, args)}")
+
+
+def tool_result(result: dict) -> None:
+    _print(tool_result_fragment(result))
 
 
 def info(text: str) -> None:

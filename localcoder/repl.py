@@ -100,6 +100,7 @@ class OutputSink:
     def token(self, piece: str) -> None: ...
     def newline(self) -> None: ...
     def tool_call(self, name: str, args: dict) -> None: ...
+    def tool_result(self, result: dict) -> None: ...
     def verbose_stats(self, meta: dict) -> None: ...
     def info(self, text: str) -> None: ...
     def ok(self, text: str) -> None: ...
@@ -120,6 +121,9 @@ class PrintSink(OutputSink):
 
     def tool_call(self, name: str, args: dict) -> None:
         ui.tool_call(name, args)
+
+    def tool_result(self, result: dict) -> None:
+        ui.tool_result(result)
 
     def verbose_stats(self, meta: dict) -> None:
         ui.verbose_stats(meta)
@@ -391,6 +395,8 @@ class App:
                     )
                 else:
                     result_payload = execute_tool(name, args, self.tool_ctx())
+
+                self.out.tool_result(result_payload)
 
                 self.conversation.append(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result_payload)}
