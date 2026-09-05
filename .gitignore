@@ -4,4 +4,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .localcoder/sessions/
+.localcoder/contexts/
+.localcoder/state.json
 roles/

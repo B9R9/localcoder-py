@@ -127,7 +127,7 @@ def test_model_list_is_a_leaf_command():
 def test_set_subcommands_need_free_text():
     items = compute_menu_items("/set", LISTS)
     values = {i.value: i.submit for i in items}
-    assert values == {"/set temperature ": False, "/set num_ctx ": False}
+    assert values == {"/set temperature ": False, "/set num_ctx ": False, "/set embed_model ": False}
 
 
 def test_stats_and_verbose_are_leaf_commands():

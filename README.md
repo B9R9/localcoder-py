@@ -113,10 +113,17 @@ alias localcoder="PYTHONPATH=/chemin/vers/localcoder-py python3 -m localcoder"
 
 ### Commandes
 
-- `/index build` — (re)construit l'index sémantique ; ne ré-embedde que
-  les fichiers dont le contenu a changé depuis le dernier build
+- `/index build [nom] [modèle]` — (re)construit l'index sémantique ; ne
+  ré-embedde que les fichiers dont le contenu a changé depuis le dernier
+  build. Sans argument, reconstruit l'index actif avec `embed_model` de la
+  config. Un nom permet de garder plusieurs index côte à côte (chacun son
+  fichier), par exemple pour comparer deux modèles d'embedding ; construire
+  un index le rend actif
+- `/index use <nom>` — bascule l'index actif vers un index déjà construit
+- `/index list` — liste tous les index construits pour ce projet (modèle,
+  nombre de fichiers/chunks, lequel est actif)
 - `/index status` — nombre de fichiers/chunks indexés, modèle utilisé,
-  date de dernière construction
+  date de dernière construction, pour l'index actif
 - `/session save [nom]` — nomme (si besoin) et sauvegarde la session
   courante ; sans argument, sauvegarde sous le nom déjà actif
 - `/session load <nom>` — charge une session sauvegardée (historique +
@@ -140,6 +147,12 @@ alias localcoder="PYTHONPATH=/chemin/vers/localcoder-py python3 -m localcoder"
   au contexte pour le reste de la session
 - `/context list` — affiche le contexte actuellement chargé
 - `/context clear` — vide le contexte (indépendant de `/reset`)
+- `/context save <nom>` — sauvegarde les chemins/globs actuellement chargés
+  comme un jeu de contexte nommé, indépendant de `/session` (qui regroupe
+  contexte + rôle + skills + historique)
+- `/context load <nom>` — recharge un jeu de contexte sauvegardé, remplace
+  le contexte actuel
+- `/context sets` — liste les jeux de contexte sauvegardés pour ce projet
 - `/model use <nom>` — change de modèle pour le reste de la session
 - `/model list` — liste les modèles déjà pull dans Ollama (`/api/tags`)
 - `/set temperature <val>` — change la température pour le reste de la

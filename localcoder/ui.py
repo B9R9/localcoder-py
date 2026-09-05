@@ -288,8 +288,8 @@ def banner_fragments(config, cwd, session_name, role, context_entries, idx_stats
         )
 
     lines.append(
-        "<dim>Commands: /index build|status  /session save|load|new|list  /role use|list|create|clear  "
-        "/skill use|list|create|clear  /context add|list|clear  /model use|list  /set temperature|num_ctx  "
+        "<dim>Commands: /index build|use|list|status  /session save|load|new|list  /role use|list|create|clear  "
+        "/skill use|list|create|clear  /context add|list|clear|save|load|sets  /model use|list  /set temperature|num_ctx  "
         "/stats  /verbose  /debug  /socratic  /summary  /search  /find  /reset  /restart  /help  /exit</dim>"
     )
     if interactive:

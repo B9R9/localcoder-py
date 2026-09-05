@@ -27,9 +27,24 @@ import traceback
 from pathlib import Path
 
 from localcoder import ui
+from localcoder.background import BackgroundManager
 from localcoder.config import load_config
-from localcoder.context import format_context_entry, load_context, load_context_path
-from localcoder.index_store import build_index, index_stats, semantic_search
+from localcoder.context import (
+    format_context_entry,
+    list_context_sets,
+    load_context,
+    load_context_path,
+    load_context_set_paths,
+    save_context_set,
+)
+from localcoder.index_store import (
+    build_index,
+    get_active_index_name,
+    index_stats,
+    list_indexes,
+    semantic_search,
+    set_active_index_name,
+)
 from localcoder.menu import TOP_COMMANDS
 from localcoder.ollama_client import OllamaCancelled, OllamaError, OllamaToolsUnsupported, chat, list_models, warm_up
 from localcoder.roles import create_role, format_role, list_roles, load_role
@@ -143,6 +158,12 @@ class App:
         # and guardrails like ADRs, not a behavioral mode.
         self.context_entries = load_context(self.config.context, self.cwd)
 
+        # context_paths: the raw path/glob strings behind context_entries —
+        # kept alongside so /context save can persist "what to load" as a
+        # named set (.localcoder/contexts/<name>.json) separately from the
+        # loaded content itself, and independently of /session.
+        self.context_paths: list[str] = list(self.config.context)
+
         # conversation: the actual back-and-forth. No system prompt in here —
         # that's assembled fresh on every call in build_messages().
         self.conversation: list = []
@@ -185,6 +206,12 @@ class App:
         # or chat messages — see begin_capture/feed_capture_line.
         self.capture: dict | None = None
 
+        # background: shell tasks started with /bg run or the model's
+        # run_shell_background tool, kept alive for the life of this process.
+        # Not persisted by session save/load — a live subprocess can't be
+        # serialized, and would be meaningless after a restart anyway.
+        self.background = BackgroundManager()
+
         if self.current_session_name:
             saved = load_session(self.current_session_name, self.cwd)
             if saved and saved.get("error"):
@@ -192,7 +219,8 @@ class App:
             elif saved:
                 self.active_role = load_role(saved["role"], self.cwd) if saved.get("role") else None
                 self.active_skills = [load_skill(n, self.cwd) for n in (saved.get("skills") or [])]
-                self.context_entries = load_context(saved.get("contextPaths") or [], self.cwd)
+                self.context_paths = list(saved.get("contextPaths") or [])
+                self.context_entries = load_context(self.context_paths, self.cwd)
                 self.conversation = list(saved.get("conversation") or [])
             # else: no saved session under this name yet — starts fresh, will
             # be created on the first autosave.
@@ -234,7 +262,13 @@ class App:
         return messages
 
     def tool_ctx(self) -> dict:
-        return {"cwd": self.cwd, "host": self.config.host, "embed_model": self.config.embed_model}
+        return {
+            "cwd": self.cwd,
+            "host": self.config.host,
+            "embed_model": self.config.embed_model,
+            "index_name": get_active_index_name(self.cwd),
+            "background": self.background,
+        }
 
     def toolbar_state(self) -> dict:
         return {
@@ -275,7 +309,7 @@ class App:
                 )
 
             try:
-                result = attempt(get_tools(self.cwd) if self.tools_supported else [])
+                result = attempt(get_tools(self.cwd, get_active_index_name(self.cwd)) if self.tools_supported else [])
             except OllamaToolsUnsupported:
                 # The model itself is fine for plain conversation — only its
                 # lack of tool-calling support caused the failure — so retry
@@ -462,6 +496,7 @@ class App:
         if sub == "add" and path:
             entries = load_context_path(path, self.cwd)
             self.context_entries.extend(entries)
+            self.context_paths.append(path)
             for entry in entries:
                 if entry["kind"] == "error":
                     self.out.warn(f"[context] {entry['content']}")
@@ -477,10 +512,38 @@ class App:
             return
         if sub == "clear":
             self.context_entries = []
+            self.context_paths = []
             self.out.ok("[context] Cleared.")
             self.autosave()
             return
-        self.out.info("[context] Usage: /context add <path|glob> | /context list | /context clear")
+        # save/load/sets: named context sets — a saved list of paths/globs you
+        # can switch between with /context load <name>, independent of
+        # /session (which bundles context with role/skills/history together).
+        if sub == "save" and path:
+            save_context_set(self.cwd, path, self.context_paths)
+            self.out.ok(f'[context] Saved current context as "{path}" ({len(self.context_paths)} path(s)).')
+            return
+        if sub == "load" and path:
+            paths = load_context_set_paths(self.cwd, path)
+            if paths is None:
+                self.out.warn(f'[context] No context set named "{path}". Use /context save {path} to create one.')
+                return
+            self.context_paths = paths
+            self.context_entries = load_context(paths, self.cwd)
+            self.out.ok(f'[context] Loaded "{path}" ({len(self.context_entries)} entrie(s)).')
+            self.autosave()
+            return
+        if sub == "sets":
+            names = list_context_sets(self.cwd)
+            if names:
+                self.out.info("\n".join(f"  - {n}" for n in names))
+            else:
+                self.out.info("[context] No saved context sets yet. Use /context save <name>.")
+            return
+        self.out.info(
+            "[context] Usage: /context add <path|glob> | /context list | /context clear | "
+            "/context save <name> | /context load <name> | /context sets"
+        )
 
     def handle_session_command(self, rest: str) -> None:
         parts = rest.strip().split()
@@ -507,7 +570,8 @@ class App:
             self.current_session_name = name
             self.active_role = load_role(saved["role"], self.cwd) if saved.get("role") else None
             self.active_skills = [load_skill(n, self.cwd) for n in (saved.get("skills") or [])]
-            self.context_entries = load_context(saved.get("contextPaths") or [], self.cwd)
+            self.context_paths = list(saved.get("contextPaths") or [])
+            self.context_entries = load_context(self.context_paths, self.cwd)
             self.conversation = list(saved.get("conversation") or [])
             self.out.ok(f'[session] Loaded "{name}" ({len(self.conversation)} messages, role: {saved.get("role") or "none"}).')
             return
@@ -538,7 +602,14 @@ class App:
         sub = parts[0] if parts else None
 
         if sub == "build":
-            self.out.info(f"[index] Building with {self.config.embed_model} (this embeds every changed file — may take a while on first run)...")
+            # /index build [name] [model] — name defaults to whatever index
+            # is currently active ("default" if none yet), model defaults to
+            # the configured embed_model. Naming lets several indexes coexist
+            # (e.g. one per embed model, to compare quality) since each is
+            # its own file; building always makes that name the active one.
+            name = parts[1] if len(parts) > 1 else get_active_index_name(self.cwd)
+            model = parts[2] if len(parts) > 2 else self.config.embed_model
+            self.out.info(f'[index] Building "{name}" with {model} (this embeds every changed file — may take a while on first run)...')
 
             # A live-updating progress line only makes sense when we own real
             # stdout — the full-screen sink just gets the final summary.
@@ -551,23 +622,92 @@ class App:
                     return None
 
             try:
-                result = build_index(self.cwd, self.config.host, self.config.embed_model, on_progress)
+                result = build_index(self.cwd, self.config.host, model, on_progress, name=name)
                 if isinstance(self.out, PrintSink):
                     print()
+                set_active_index_name(self.cwd, name)
                 self.out.ok(f"[index] Done — {result['fileCount']} files ({result['embedded']} embedded, {result['reused']} unchanged/reused).")
             except Exception as err:  # noqa: BLE001 — surface any embedding/network failure to the user
                 if isinstance(self.out, PrintSink):
                     print()
                 self.out.err(f"[index] Failed: {err}")
             return
+        if sub == "use" and len(parts) > 1:
+            name = parts[1]
+            if not index_stats(self.cwd, name):
+                self.out.warn(f'[index] No index named "{name}". Use /index build {name} to create one.')
+                return
+            set_active_index_name(self.cwd, name)
+            self.out.ok(f'[index] Now using "{name}".')
+            return
+        if sub == "list":
+            indexes = list_indexes(self.cwd)
+            if not indexes:
+                self.out.info("[index] No index built yet. Run /index build.")
+                return
+            active = get_active_index_name(self.cwd)
+            self.out.info(
+                "\n".join(
+                    f"  - {i['name']}{' (active)' if i['name'] == active else ''}: "
+                    f"{i['fileCount']} files, {i['chunkCount']} chunks, model {i['model']}"
+                    for i in indexes
+                )
+            )
+            return
         if sub == "status":
-            stats = index_stats(self.cwd)
+            name = get_active_index_name(self.cwd)
+            stats = index_stats(self.cwd, name)
             if stats:
-                self.out.info(f"[index] {stats['fileCount']} files, {stats['chunkCount']} chunks, model {stats['model']}, built {stats['updatedAt']}")
+                label = "" if name == "default" else f'"{name}": '
+                self.out.info(f"[index] {label}{stats['fileCount']} files, {stats['chunkCount']} chunks, model {stats['model']}, built {stats['updatedAt']}")
             else:
                 self.out.info("[index] No index built yet. Run /index build.")
             return
-        self.out.info("[index] Usage: /index build | /index status")
+        self.out.info("[index] Usage: /index build [name] [model] | /index use <name> | /index list | /index status")
+
+    def handle_bg_command(self, rest: str) -> None:
+        parts = rest.strip().split(maxsplit=1)
+        sub = parts[0] if parts else None
+        arg = parts[1] if len(parts) > 1 else None
+
+        if sub == "run" and arg:
+            result = self.background.start(arg, self.cwd)
+            if result.get("error"):
+                self.out.err(f"[bg] {result['error']}")
+            else:
+                self.out.ok(f"[bg] Started {result['id']}: {arg}")
+            return
+        if sub == "list":
+            tasks = self.background.list()
+            if not tasks:
+                self.out.info("[bg] No background tasks yet — start one with /bg run <command>.")
+            else:
+                for t in tasks:
+                    state = "running" if t["running"] else f"exited {t['exitCode']}"
+                    self.out.info(f"  {t['id']}  [{state}]  {t['command']}")
+            return
+        if sub == "output" and arg:
+            result = self.background.output(arg)
+            if result.get("error"):
+                self.out.warn(f"[bg] {result['error']}")
+                return
+            state = "running" if result["running"] else f"exited {result['exitCode']}"
+            self.out.info(f"[bg] {result['id']} [{state}] {result['command']}")
+            if result["stdout"]:
+                self.out.info(result["stdout"])
+            if result["stderr"]:
+                self.out.warn(result["stderr"])
+            return
+        if sub == "stop" and arg:
+            result = self.background.stop(arg)
+            if result.get("error"):
+                self.out.warn(f"[bg] {result['error']}")
+            elif result.get("note"):
+                self.out.info(f"[bg] {arg} {result['note']}.")
+            else:
+                self.out.ok(f"[bg] Stopped {arg}.")
+            return
+        self.out.info("[bg] Usage: /bg run <command> | /bg list | /bg output <id> | /bg stop <id>")
 
     def handle_model_command(self, rest: str) -> None:
         parts = rest.strip().split()
@@ -607,7 +747,11 @@ class App:
             except ValueError:
                 self.out.warn(f'[set] "{value}" is not a valid integer.')
             return
-        self.out.info("[set] Usage: /set temperature <value> | /set num_ctx <value>")
+        if sub == "embed_model" and value is not None:
+            self.config.embed_model = value
+            self.out.ok(f'[set] embed_model = "{value}" (used by the next /index build).')
+            return
+        self.out.info("[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name>")
 
     def handle_stats_command(self) -> None:
         s = self.stats
@@ -698,7 +842,8 @@ class App:
         # fall back to meaning-based search over the built index (if there
         # is one) instead of just reporting failure — this is exactly what
         # semantic_search gives the model, now reachable directly too.
-        if not index_stats(self.cwd):
+        active_index = get_active_index_name(self.cwd)
+        if not index_stats(self.cwd, active_index):
             self.out.info(
                 "[search] (no exact matches). That's expected for a description rather than "
                 'exact wording — run "/index build" once to also enable meaning-based search here.'
@@ -706,7 +851,7 @@ class App:
             return
 
         self.out.info("[search] No exact matches — trying meaning-based search over the index instead...")
-        semantic = semantic_search(pattern, cwd=self.cwd, host=self.config.host, model=self.config.embed_model)
+        semantic = semantic_search(pattern, cwd=self.cwd, host=self.config.host, model=self.config.embed_model, name=active_index)
         if "error" in semantic:
             self.out.warn(f"[search] {semantic['error']}")
             return
@@ -715,8 +860,12 @@ class App:
             self.out.info("[search] (no matches, even by meaning)")
             return
         for r in results:
-            snippet = r["text"].strip().splitlines()[0][:80]
-            self.out.info(f"  {r['path']}:{r['startLine']}-{r['endLine']} ({r['score']:.2f}) — {snippet}")
+            # Show several lines of the actual chunk, not just its first line —
+            # a single line is often a module docstring/comment, which reads as
+            # "just doc, not code" even though the code follows right after it.
+            lines = r["text"].strip("\n").splitlines()[:6]
+            snippet = "\n".join(f"    {line}" for line in lines)
+            self.out.info(f"  {r['path']}:{r['startLine']}-{r['endLine']} ({r['score']:.2f})\n{snippet}")
 
     def handle_find_command(self, rest: str) -> None:
         symbol = rest.strip()
@@ -828,6 +977,9 @@ def _dispatch_command(app: App, trimmed: str, cancel_event=None, on_response=Non
         return True
     if trimmed.startswith("/context"):
         app.handle_context_command(trimmed[len("/context"):])
+        return True
+    if trimmed.startswith("/bg"):
+        app.handle_bg_command(trimmed[len("/bg"):])
         return True
     if trimmed.startswith("/model"):
         app.handle_model_command(trimmed[len("/model"):])

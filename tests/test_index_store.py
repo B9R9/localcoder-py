@@ -74,3 +74,33 @@ def test_chunking_splits_long_files(tmp_path, monkeypatch):
     stats = index_store.index_stats(tmp_path)
     # 120 lines / (40 - 8 overlap per step) should split into multiple chunks
     assert stats["chunkCount"] > 1
+
+
+def test_named_indexes_coexist(tmp_path, monkeypatch):
+    monkeypatch.setattr(index_store, "embed", _fake_embed)
+    (tmp_path / "a.py").write_text("x" * 10 + "\n")
+
+    index_store.build_index(tmp_path, "http://fake", "fake-embed", name="default")
+    index_store.build_index(tmp_path, "http://fake", "other-model", name="alt")
+
+    # Each name is its own file — building one doesn't disturb the other.
+    assert index_store.index_stats(tmp_path, "default")["model"] == "fake-embed"
+    assert index_store.index_stats(tmp_path, "alt")["model"] == "other-model"
+
+
+def test_list_indexes_reports_every_named_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(index_store, "embed", _fake_embed)
+    assert index_store.list_indexes(tmp_path) == []
+
+    (tmp_path / "a.py").write_text("x" * 10 + "\n")
+    index_store.build_index(tmp_path, "http://fake", "fake-embed", name="default")
+    index_store.build_index(tmp_path, "http://fake", "fake-embed", name="alt")
+
+    names = sorted(i["name"] for i in index_store.list_indexes(tmp_path))
+    assert names == ["alt", "default"]
+
+
+def test_active_index_defaults_to_default_and_can_switch(tmp_path):
+    assert index_store.get_active_index_name(tmp_path) == "default"
+    index_store.set_active_index_name(tmp_path, "alt")
+    assert index_store.get_active_index_name(tmp_path) == "alt"

@@ -14,6 +14,7 @@ import threading
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.output import DummyOutput
 
 from localcoder.fullscreen import _MENU_MAX_ROWS, ScreenApp
@@ -407,6 +408,99 @@ def test_transcript_auto_scrolls_to_bottom_and_pageup_pagedown_scroll(tmp_path, 
                 await task
 
     asyncio.run(go())
+
+
+def test_up_down_arrows_scroll_transcript_one_line_when_menu_is_closed(tmp_path, monkeypatch):
+    """With no "/" menu open, ↑/↓ used to be dead keys against a single-line
+    input buffer (auto_up/auto_down have nothing to do there). They now walk
+    the transcript one line at a time, the same focus-hop-then-restore
+    pattern PageUp/PageDown already use.
+    """
+    app = _make_app(tmp_path, monkeypatch)
+
+    async def go():
+        with create_pipe_input() as pipe_input:
+            screen = ScreenApp(app, input=pipe_input, output=DummyOutput())
+            screen._loop = asyncio.get_running_loop()
+
+            task = asyncio.ensure_future(screen.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+
+                for i in range(100):
+                    screen.append_raw(f"line {i}")
+                await asyncio.sleep(0.05)
+
+                bottom = screen.transcript_window.render_info.first_visible_line()
+
+                pipe_input.send_text("\x1b[A")  # Up
+                await asyncio.sleep(0.1)
+                after_up = screen.transcript_window.render_info.first_visible_line()
+                assert after_up < bottom  # scrolled up by one line
+                assert screen.application.layout.current_window is screen.input_window  # focus returned
+                assert screen.input_buffer.text == ""  # never touched the input line
+
+                pipe_input.send_text("\x1b[B")  # Down
+                await asyncio.sleep(0.1)
+                after_down = screen.transcript_window.render_info.first_visible_line()
+                assert after_down > after_up  # scrolled back down
+            finally:
+                screen.application.exit()
+                await task
+
+    asyncio.run(go())
+
+
+def test_up_arrow_reaches_the_top_of_a_transcript_with_wrapped_lines(tmp_path, monkeypatch):
+    """Regression test: prompt_toolkit's own scroll_one_line_up has a known
+    bug (its docstring TODO says as much) with wrapped content — it advances
+    the buffer cursor by document lines while reasoning about *screen* rows,
+    so on long wrapped lines the next render's keep-cursor-visible clamp can
+    snap vertical_scroll back down before it ever reaches the top. That read
+    as "scrolling up stops partway and older history becomes unreachable".
+    Repeatedly pressing ↑ against a transcript full of long (wrapping) lines
+    must still walk all the way to document line 0.
+    """
+    app = _make_app(tmp_path, monkeypatch)
+
+    async def go():
+        with create_pipe_input() as pipe_input:
+            screen = ScreenApp(app, input=pipe_input, output=DummyOutput())
+            screen._loop = asyncio.get_running_loop()
+
+            task = asyncio.ensure_future(screen.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+
+                # 80-column output (DummyOutput's default) — each of these
+                # wraps across several screen rows, unlike the short lines in
+                # test_up_down_arrows_scroll_transcript_one_line_when_menu_is_closed.
+                for i in range(30):
+                    screen.append_raw(f"line {i} " + "x" * 200)
+                await asyncio.sleep(0.05)
+
+                for _ in range(200):
+                    pipe_input.send_text("\x1b[A")  # Up
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+
+                assert screen.transcript_window.render_info.first_visible_line() == 0
+                assert screen.application.layout.current_window is screen.input_window
+            finally:
+                screen.application.exit()
+                await task
+
+    asyncio.run(go())
+
+
+def test_transcript_window_has_a_scrollbar_margin(tmp_path, monkeypatch):
+    """The right-hand scrollbar is the visual "where am I in the transcript"
+    indicator for PageUp/PageDown/↑/↓ scrolling — assert it's actually wired
+    onto the transcript window's margins.
+    """
+    app = _make_app(tmp_path, monkeypatch)
+    screen = ScreenApp(app)
+    assert any(isinstance(m, ScrollbarMargin) for m in screen.transcript_window.right_margins)
 
 
 def test_mouse_support_is_off_so_native_copy_paste_keeps_working(tmp_path, monkeypatch):

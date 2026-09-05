@@ -7,6 +7,7 @@ a real model. Not part of the shipped CLI.
 from __future__ import annotations
 
 import json
+import os
 import string
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

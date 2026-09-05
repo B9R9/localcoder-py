@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localcoder.embeddings import embed
+from localcoder.local_state import get_state, set_state_value
 
 CHUNK_LINES = 40
 CHUNK_OVERLAP = 8
 MAX_FILES = 2000  # safety cap, not a tuning knob
+DEFAULT_INDEX_NAME = "default"
 
 IGNORE_DIRS = {"node_modules", ".git", "dist", "build", ".next", ".nuxt", "coverage", ".localcoder"}
 INDEXABLE_EXT = {
@@ -27,8 +29,21 @@ INDEXABLE_EXT = {
 }
 
 
-def _index_path(cwd: Path) -> Path:
-    return cwd / ".localcoder" / "index.json"
+# "default" keeps the original unnamed-index filename so existing indexes
+# (and the test suite) keep working untouched; any other name gets its own
+# file so several indexes (e.g. one per embed model) can coexist.
+def _index_path(cwd: Path, name: str = DEFAULT_INDEX_NAME) -> Path:
+    if name == DEFAULT_INDEX_NAME:
+        return cwd / ".localcoder" / "index.json"
+    return cwd / ".localcoder" / f"index.{name}.json"
+
+
+def get_active_index_name(cwd: Path) -> str:
+    return get_state(cwd).get("activeIndex") or DEFAULT_INDEX_NAME
+
+
+def set_active_index_name(cwd: Path, name: str) -> None:
+    set_state_value(cwd, "activeIndex", name)
 
 
 def _hash_content(content: str) -> str:
@@ -78,8 +93,8 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def load_index(cwd: Path) -> Optional[dict]:
-    full = _index_path(cwd)
+def load_index(cwd: Path, name: str = DEFAULT_INDEX_NAME) -> Optional[dict]:
+    full = _index_path(cwd, name)
     if not full.exists():
         return None
     try:
@@ -88,16 +103,24 @@ def load_index(cwd: Path) -> Optional[dict]:
         return None
 
 
-def _save_index(cwd: Path, data: dict) -> None:
-    full = _index_path(cwd)
+def _save_index(cwd: Path, data: dict, name: str = DEFAULT_INDEX_NAME) -> None:
+    full = _index_path(cwd, name)
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text(json.dumps(data), encoding="utf-8")
 
 
 # Rebuilds the index, reusing embeddings for files whose content hash hasn't
 # changed since the last build. on_progress(path, i, total) is called per file.
-def build_index(cwd: Path, host: str, model: str, on_progress: Optional[Callable[[str, int, int], None]] = None) -> dict:
-    existing = load_index(cwd) or {"model": model, "files": {}}
+# `name` lets several indexes coexist (e.g. one per embed model) — each keeps
+# its own file and its own embed model, chosen at build time.
+def build_index(
+    cwd: Path,
+    host: str,
+    model: str,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
+    name: str = DEFAULT_INDEX_NAME,
+) -> dict:
+    existing = load_index(cwd, name) or {"model": model, "files": {}}
     paths: list[str] = []
     _walk_files(cwd, cwd, paths)
 
@@ -134,14 +157,14 @@ def build_index(cwd: Path, host: str, model: str, on_progress: Optional[Callable
         embedded += 1
 
     data = {"model": model, "updatedAt": datetime.now(timezone.utc).isoformat(), "files": files}
-    _save_index(cwd, data)
+    _save_index(cwd, data, name)
     return {"fileCount": len(paths), "embedded": embedded, "reused": reused}
 
 
-def semantic_search(query: str, cwd: Path, host: str, model: str, top_k: int = 8) -> dict:
-    idx = load_index(cwd)
+def semantic_search(query: str, cwd: Path, host: str, model: str, top_k: int = 8, name: str = DEFAULT_INDEX_NAME) -> dict:
+    idx = load_index(cwd, name)
     if not idx or not idx.get("files"):
-        return {"error": "No index built yet. Run /index build first."}
+        return {"error": f'No index named "{name}" built yet. Run /index build.'}
 
     query_embedding = embed(host, idx["model"], [query])[0]
 
@@ -161,10 +184,29 @@ def semantic_search(query: str, cwd: Path, host: str, model: str, top_k: int = 8
     return {"results": scored[:top_k]}
 
 
-def index_stats(cwd: Path) -> Optional[dict]:
-    idx = load_index(cwd)
+def index_stats(cwd: Path, name: str = DEFAULT_INDEX_NAME) -> Optional[dict]:
+    idx = load_index(cwd, name)
     if not idx:
         return None
     file_count = len(idx["files"])
     chunk_count = sum(len(f["chunks"]) for f in idx["files"].values())
     return {"model": idx["model"], "updatedAt": idx["updatedAt"], "fileCount": file_count, "chunkCount": chunk_count}
+
+
+# Every index.json / index.<name>.json under .localcoder, alphabetical.
+def list_indexes(cwd: Path) -> list[dict]:
+    folder = cwd / ".localcoder"
+    if not folder.is_dir():
+        return []
+    names = []
+    for f in folder.glob("index*.json"):
+        if f.name == "index.json":
+            names.append(DEFAULT_INDEX_NAME)
+        elif f.name.startswith("index.") and f.name.endswith(".json"):
+            names.append(f.name[len("index."):-len(".json")])
+    result = []
+    for name in sorted(names):
+        stats = index_stats(cwd, name)
+        if stats:
+            result.append({"name": name, **stats})
+    return result

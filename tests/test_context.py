@@ -1,4 +1,12 @@
-from localcoder.context import format_context_entry, list_project_files, load_context_entry, load_context_path
+from localcoder.context import (
+    format_context_entry,
+    list_context_sets,
+    list_project_files,
+    load_context_entry,
+    load_context_path,
+    load_context_set_paths,
+    save_context_set,
+)
 
 
 def test_file_entry(tmp_path):
@@ -64,3 +72,21 @@ def test_list_project_files_excludes_ignored_dirs(tmp_path):
     files = list_project_files(tmp_path)
     assert "src/app.js" in files
     assert not any("node_modules" in f for f in files)
+
+
+def test_named_context_set_round_trip(tmp_path):
+    assert load_context_set_paths(tmp_path, "adr") is None
+    assert list_context_sets(tmp_path) == []
+
+    save_context_set(tmp_path, "adr", ["docs/adr/*.md", "README.md"])
+
+    assert load_context_set_paths(tmp_path, "adr") == ["docs/adr/*.md", "README.md"]
+    assert list_context_sets(tmp_path) == ["adr"]
+
+
+def test_saving_a_context_set_again_overwrites_it(tmp_path):
+    save_context_set(tmp_path, "adr", ["README.md"])
+    save_context_set(tmp_path, "adr", ["docs/"])
+
+    assert load_context_set_paths(tmp_path, "adr") == ["docs/"]
+    assert list_context_sets(tmp_path) == ["adr"]

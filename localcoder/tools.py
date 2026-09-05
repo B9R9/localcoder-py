@@ -186,11 +186,55 @@ BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_shell",
-            "description": "Run a shell command in the project root and return stdout/stderr/exit code.",
+            "description": "Run a shell command in the project root and return stdout/stderr/exit code. Blocks until it finishes (or times out after 120s) — use run_shell_background instead for anything long-running (dev servers, watchers, long builds).",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell_background",
+            "description": "Start a shell command in the project root without waiting for it to finish — returns immediately with a task id. Use for dev servers, watchers, or anything long-running. Check on it with list_background_tasks / get_background_output, and stop it with stop_background_task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_background_tasks",
+            "description": "List background tasks started with run_shell_background, with their running/exit status.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_background_output",
+            "description": "Get the stdout/stderr captured so far for a background task, plus whether it's still running.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_background_task",
+            "description": "Terminate a running background task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
             },
         },
     },
@@ -236,12 +280,12 @@ SYMBOL_TOOLS = [
     },
 ]
 
-WRITE_TOOLS = {"write_file", "edit_file", "run_shell"}
+WRITE_TOOLS = {"write_file", "edit_file", "run_shell", "run_shell_background", "stop_background_task"}
 
 
-def get_tools(cwd: Path) -> list[dict]:
+def get_tools(cwd: Path, index_name: str = "default") -> list[dict]:
     tools = list(BASE_TOOLS)
-    if index_stats(cwd):
+    if index_stats(cwd, index_name):
         tools.append(SEMANTIC_SEARCH_TOOL)
     if has_ctags():
         tools.extend(SYMBOL_TOOLS)
@@ -342,7 +386,9 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
             return {"error": str(err)}
 
     if name == "semantic_search":
-        result = semantic_search(args["query"], cwd=cwd, host=ctx["host"], model=ctx["embed_model"])
+        result = semantic_search(
+            args["query"], cwd=cwd, host=ctx["host"], model=ctx["embed_model"], name=ctx.get("index_name", "default")
+        )
         if "error" in result:
             return result
         return {
@@ -383,5 +429,17 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
             }
         except subprocess.TimeoutExpired:
             return {"exitCode": 1, "stdout": "", "stderr": "Command timed out after 120s."}
+
+    if name == "run_shell_background":
+        return ctx["background"].start(args["command"], cwd)
+
+    if name == "list_background_tasks":
+        return {"tasks": ctx["background"].list()}
+
+    if name == "get_background_output":
+        return ctx["background"].output(args["id"])
+
+    if name == "stop_background_task":
+        return ctx["background"].stop(args["id"])
 
     return {"error": f"Unknown tool: {name}"}

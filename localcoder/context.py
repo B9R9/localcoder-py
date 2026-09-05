@@ -4,6 +4,7 @@ never an automatic scan or index. Mirrors src/context.mjs.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -112,3 +113,35 @@ def list_project_files(cwd: Path) -> list[str]:
     entries: list[str] = []
     _walk(cwd, 6, entries)
     return [e.replace(f"{cwd}/", "") for e in entries]
+
+
+# Named context sets: a saved list of paths/globs the user can switch to
+# with /context load <name>, independent of /session (which bundles context
+# with role/skills/history as one blob). Stored one file per name so they
+# can be listed and swapped without touching the rest of session state.
+def _contexts_dir(cwd: Path) -> Path:
+    return cwd / ".localcoder" / "contexts"
+
+
+def save_context_set(cwd: Path, name: str, paths: list[str]) -> None:
+    folder = _contexts_dir(cwd)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{name}.json").write_text(json.dumps({"paths": paths}), encoding="utf-8")
+
+
+def load_context_set_paths(cwd: Path, name: str) -> list[str] | None:
+    full = _contexts_dir(cwd) / f"{name}.json"
+    if not full.exists():
+        return None
+    try:
+        data = json.loads(full.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data.get("paths") or []
+
+
+def list_context_sets(cwd: Path) -> list[str]:
+    folder = _contexts_dir(cwd)
+    if not folder.is_dir():
+        return []
+    return sorted(p.stem for p in folder.glob("*.json"))

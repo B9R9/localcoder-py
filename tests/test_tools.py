@@ -1,4 +1,16 @@
+import time
+
+from localcoder.background import BackgroundManager
 from localcoder.tools import execute_tool, get_tools, needs_confirmation
+
+
+def _wait_until(predicate, timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _fixture(tmp_path):
@@ -185,8 +197,29 @@ def test_needs_confirmation():
     assert needs_confirmation("write_file") is True
     assert needs_confirmation("edit_file") is True
     assert needs_confirmation("run_shell") is True
+    assert needs_confirmation("run_shell_background") is True
+    assert needs_confirmation("stop_background_task") is True
     assert needs_confirmation("read_file") is False
     assert needs_confirmation("search_code") is False
+    assert needs_confirmation("list_background_tasks") is False
+    assert needs_confirmation("get_background_output") is False
+
+
+def test_run_shell_background_dispatch(tmp_path):
+    ctx = {"cwd": tmp_path, "background": BackgroundManager()}
+    started = execute_tool("run_shell_background", {"command": "echo hi"}, ctx)
+    assert started["started"] is True
+    task_id = started["id"]
+
+    listed = execute_tool("list_background_tasks", {}, ctx)
+    assert listed["tasks"][0]["id"] == task_id
+
+    assert _wait_until(lambda: not ctx["background"].output(task_id)["running"])
+    output = execute_tool("get_background_output", {"id": task_id}, ctx)
+    assert "hi" in output["stdout"]
+
+    stopped = execute_tool("stop_background_task", {"id": task_id}, ctx)
+    assert stopped.get("note") == "already finished"
 
 
 def test_get_tools_no_index_no_ctags(tmp_path, monkeypatch):
@@ -194,7 +227,18 @@ def test_get_tools_no_index_no_ctags(tmp_path, monkeypatch):
     # installed on the machine running the tests.
     monkeypatch.setattr("localcoder.tools.has_ctags", lambda: False)
     names = [t["function"]["name"] for t in get_tools(tmp_path)]
-    assert names == ["read_file", "list_dir", "search_code", "edit_file", "write_file", "run_shell"]
+    assert names == [
+        "read_file",
+        "list_dir",
+        "search_code",
+        "edit_file",
+        "write_file",
+        "run_shell",
+        "run_shell_background",
+        "list_background_tasks",
+        "get_background_output",
+        "stop_background_task",
+    ]
 
 
 def test_get_tools_advertises_symbol_tools_when_ctags_present(tmp_path, monkeypatch):

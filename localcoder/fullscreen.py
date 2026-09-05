@@ -44,6 +44,7 @@ from prompt_toolkit.key_binding.defaults import load_key_bindings
 from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.lexers import Lexer
@@ -51,7 +52,8 @@ from prompt_toolkit.widgets import Frame
 
 from localcoder import ui
 from localcoder.browse import browse_entries
-from localcoder.index_store import index_stats
+from localcoder.context import list_context_sets
+from localcoder.index_store import get_active_index_name, index_stats, list_indexes
 from localcoder.menu import compute_menu_items
 from localcoder.ollama_client import OllamaError, force_close, list_models, warm_up
 from localcoder.repl import App, OutputSink, _dispatch_command, _relaunch
@@ -59,8 +61,38 @@ from localcoder.roles import list_roles
 from localcoder.sessions import list_sessions
 from localcoder.skills import list_skills
 
-_MENU_MAX_ROWS = 10
+_MENU_MAX_ROWS = 20
 _SPINNER_INTERVAL = 0.12
+
+
+def _scroll_one_line_up(event) -> None:
+    """Like prompt_toolkit's own scroll_one_line_up, but safe for a wrapped
+    transcript. The stock version (see its TODO: "not entirely correct yet,
+    in case of line wrapping") advances the cursor by document lines while
+    reasoning about *screen* rows, so on a long wrapped reply it can jump the
+    cursor further than the one line of scroll it just applied — the next
+    render's keep-cursor-visible clamp then snaps vertical_scroll back down,
+    which reads as the transcript refusing to scroll past a certain point.
+    Anchoring on first_visible_line() (a document-line index, exactly what
+    vertical_scroll itself is) instead of the cursor sidesteps the mismatch —
+    the same trick scroll_page_up/scroll_page_down already use below.
+    """
+    w = event.app.layout.current_window
+    b = event.app.current_buffer
+    if w and w.render_info:
+        line_index = max(0, w.render_info.first_visible_line() - 1)
+        w.vertical_scroll = line_index
+        b.cursor_position = b.document.translate_row_col_to_index(line_index, 0)
+
+
+def _scroll_one_line_down(event) -> None:
+    """Down-scroll counterpart to _scroll_one_line_up — see its docstring."""
+    w = event.app.layout.current_window
+    b = event.app.current_buffer
+    if w and w.render_info:
+        line_index = w.render_info.first_visible_line() + 1
+        w.vertical_scroll = line_index
+        b.cursor_position = b.document.translate_row_col_to_index(line_index, 0)
 
 
 def _split_into_lines(fragments):
@@ -209,6 +241,12 @@ class ScreenApp:
             wrap_lines=True,
             always_hide_cursor=True,
             allow_scroll_beyond_bottom=True,
+            # A thin vertical bar tracking how far through the transcript the
+            # visible window currently sits — the "where am I" indicator that
+            # PageUp/PageDown/↑/↓ scrolling otherwise gives no visual feedback
+            # for. display_arrows=False: there's no room for ▲/▼ glyphs in a
+            # single-column margin without eating into the bar itself.
+            right_margins=[ScrollbarMargin(display_arrows=False)],
         )
         self.status_window = Window(height=1, content=FormattedTextControl(text=self._status_fragments))
         # A bordered popup (prompt_toolkit's Frame widget) with a filter-style
@@ -407,7 +445,7 @@ class ScreenApp:
             self.app.current_session_name,
             self.app.active_role,
             self.app.context_entries,
-            index_stats(self.app.cwd),
+            index_stats(self.app.cwd, get_active_index_name(self.app.cwd)),
             True,
             skills=self.app.active_skills,
         ):
@@ -434,6 +472,8 @@ class ScreenApp:
             "models": lambda: list_models(a.config.host),
             "skills": lambda: list_skills(a.cwd),
             "files": lambda partial: browse_entries(a.cwd, partial),
+            "context_set": lambda: list_context_sets(a.cwd),
+            "index": lambda: [i["name"] for i in list_indexes(a.cwd)],
         }
 
     def current_menu_items(self) -> list:
@@ -480,6 +520,14 @@ class ScreenApp:
             frags.append(("class:menu.desc", f"▲ {start} more above\n"))
         for idx, item in enumerate(visible):
             current = (start + idx) == current_idx
+            if current:
+                # Marks where prompt_toolkit's Window should scroll to keep
+                # this row visible. Without it the Window has no idea which
+                # of these lines is "the selection" — if the popup ever
+                # renders shorter than this whole slice (a short terminal, or
+                # a long description wrapping onto extra lines), it just
+                # clips from the top instead of scrolling to the highlight.
+                frags.append(("[SetCursorPosition]", ""))
             cmd_style = "class:menu.cmd.current" if current else "class:menu.cmd"
             desc_style = "class:menu.desc.current" if current else "class:menu.desc"
             if "  — " in item.display:
@@ -679,16 +727,26 @@ class ScreenApp:
             items = screen.current_menu_items()
             if items:
                 screen.menu_index = (screen.menu_index - 1) % len(items)
-            else:
-                event.current_buffer.auto_up()
+                return
+            # Menu closed and the input is a single line, so there's nothing
+            # for auto_up() to do in the buffer itself — repurpose ↑ to walk
+            # back up the transcript, one line at a time, the same
+            # focus-hop-then-restore trick PageUp uses below.
+            layout = event.app.layout
+            layout.focus(screen.transcript_window)
+            _scroll_one_line_up(event)
+            layout.focus(screen.input_window)
 
         @kb.add("down")
         def _down(event):
             items = screen.current_menu_items()
             if items:
                 screen.menu_index = (screen.menu_index + 1) % len(items)
-            else:
-                event.current_buffer.auto_down()
+                return
+            layout = event.app.layout
+            layout.focus(screen.transcript_window)
+            _scroll_one_line_down(event)
+            layout.focus(screen.input_window)
 
         @kb.add("escape")
         def _escape(event):
