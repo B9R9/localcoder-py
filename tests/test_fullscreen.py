@@ -554,6 +554,31 @@ def test_ctrl_c_force_closes_the_in_flight_response(tmp_path, monkeypatch):
     asyncio.run(go())
 
 
+def test_ctrl_p_toggles_plan_mode(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    async def go():
+        with create_pipe_input() as pipe_input:
+            screen = ScreenApp(app, input=pipe_input, output=DummyOutput())
+            task = asyncio.ensure_future(screen.application.run_async())
+            try:
+                await asyncio.sleep(0.05)
+
+                assert app.plan_mode is False
+                pipe_input.send_text("\x10")  # Ctrl+P
+                await asyncio.sleep(0.05)
+                assert app.plan_mode is True
+
+                pipe_input.send_text("\x10")
+                await asyncio.sleep(0.05)
+                assert app.plan_mode is False
+            finally:
+                screen.application.exit()
+                await task
+
+    asyncio.run(go())
+
+
 def test_worker_thread_output_never_jumps_ahead_of_its_own_echoed_command(tmp_path, monkeypatch):
     """Real bug report: "[model] Now using ..." showed up in the transcript
     *before* the "you> /model use ..." line that triggered it. Slash commands

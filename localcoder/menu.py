@@ -55,6 +55,7 @@ TOP_COMMANDS = [
     {"cmd": "/verbose", "desc": "Toggle a per-turn timing breakdown, like `ollama run --verbose`", "arg": None},
     {"cmd": "/debug", "desc": "Toggle full tracebacks on errors instead of a short message", "arg": None},
     {"cmd": "/socratic", "desc": "Toggle Socratic mode — guided questions instead of direct answers, to keep learning", "arg": None},
+    {"cmd": "/plan", "desc": "Toggle plan mode — blocks write actions (edit/write/run) so the model can only read/search (Ctrl+P in full-screen)", "arg": None},
     {"cmd": "/summary", "desc": "Ask the model to recap the conversation — prints it, or saves it to a file", "arg": None},
     {"cmd": "/search", "desc": "Search the whole project for exact text/regex — works with no context added, no model round-trip", "arg": "free"},
     {"cmd": "/find", "desc": "Find an exact symbol's definition/references across the whole project — no context needed", "arg": "free"},

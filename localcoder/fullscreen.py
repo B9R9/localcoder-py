@@ -782,6 +782,11 @@ class ScreenApp:
             scroll_page_down(event)
             layout.focus(screen.input_window)
 
+        @kb.add("c-p")
+        def _ctrl_p(event):
+            screen.app.toggle_plan_mode()
+            get_app().invalidate()
+
         @kb.add("c-c")
         def _ctrl_c(event):
             if screen.busy and screen.cancel_event is not None:

@@ -44,6 +44,57 @@ def test_toggle_socratic_flips_state_and_reports_it(tmp_path, monkeypatch):
     assert "off" in messages[-1]
 
 
+def test_toggle_plan_mode_flips_state_and_reports_it(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    messages = []
+    app.out.ok = messages.append
+
+    assert app.plan_mode is False
+    app.toggle_plan_mode()
+    assert app.plan_mode is True
+    assert "on" in messages[-1]
+    app.toggle_plan_mode()
+    assert app.plan_mode is False
+    assert "off" in messages[-1]
+
+
+def test_plan_mode_blocks_write_tools_without_asking_for_confirmation(tmp_path, monkeypatch):
+    """While plan mode is active, a write tool call must be refused outright
+    — the model gets a normal tool error back — and the user is never
+    prompted, unlike the ordinary confirm/decline path."""
+    from localcoder import repl as repl_module
+
+    app = _make_app(tmp_path, monkeypatch)
+    app.plan_mode = True
+    app.conversation.append({"role": "user", "content": "create a new file"})
+
+    calls = iter(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    {"id": "1", "function": {"name": "write_file", "arguments": {"path": "x.txt", "content": "hi"}}}
+                ],
+                "done_meta": None,
+            },
+            {"content": "Can't do that — plan mode is on.", "tool_calls": None, "done_meta": None},
+        ]
+    )
+    monkeypatch.setattr(repl_module, "chat", lambda **kwargs: next(calls))
+
+    confirm_calls = []
+
+    def confirm_fn(question):
+        confirm_calls.append(question)
+        return True
+
+    app.run_turn(confirm_fn=confirm_fn)
+
+    assert confirm_calls == []
+    tool_result = next(m for m in app.conversation if m.get("role") == "tool")
+    assert "Plan mode is active" in tool_result["content"]
+
+
 def test_socratic_mode_injects_an_extra_system_message(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     assert not any(m["content"] == SOCRATIC_PROMPT for m in app.build_messages())

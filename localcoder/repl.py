@@ -189,6 +189,13 @@ class App:
         # questions rather than just handing over the answer/code.
         self.socratic = False
 
+        # plan_mode: off by default — when on, write tools (see WRITE_TOOLS
+        # in tools.py) are blocked outright instead of going through the
+        # normal confirm/decline flow, so the model can only read/search
+        # while the user reviews its plan. Toggle with /plan or Ctrl+P in
+        # the full-screen UI.
+        self.plan_mode = False
+
         # tools_supported: not every model on the Hub does tool-calling
         # (plenty are chat-only) — flips to False the first time Ollama
         # rejects a request specifically for that reason, so later turns
@@ -281,6 +288,7 @@ class App:
             "last_prompt_tokens": self.last_prompt_tokens,
             "debug": self.debug or None,
             "socratic": self.socratic or None,
+            "plan_mode": self.plan_mode or None,
             "tools_disabled": (not self.tools_supported) or None,
         }
 
@@ -374,7 +382,9 @@ class App:
 
                 self.out.tool_call(name, args)
 
-                if needs_confirmation(name):
+                if self.plan_mode and needs_confirmation(name):
+                    result_payload = {"error": "Plan mode is active — write actions are blocked until the user turns it off."}
+                elif needs_confirmation(name):
                     approved = confirm_fn("[localcoder] Approve this action?")
                     result_payload = (
                         execute_tool(name, args, self.tool_ctx()) if approved else {"error": "User declined this action."}
@@ -783,6 +793,14 @@ class App:
             f"{'guide you with questions instead of giving direct answers' if self.socratic else 'answer directly again'}."
         )
 
+    def toggle_plan_mode(self) -> None:
+        self.plan_mode = not self.plan_mode
+        state = "on" if self.plan_mode else "off"
+        self.out.ok(
+            f"[plan mode] {state} — write actions (editing/writing files, running commands) will "
+            f"{'be blocked until you turn this off again' if self.plan_mode else 'go through the normal confirmation prompt again'}."
+        )
+
     def handle_summary_command(self, rest: str, cancel_event=None, on_response=None) -> None:
         path = rest.strip() or None
         if not self.conversation:
@@ -953,6 +971,9 @@ def _dispatch_command(app: App, trimmed: str, cancel_event=None, on_response=Non
         return True
     if trimmed == "/socratic":
         app.toggle_socratic()
+        return True
+    if trimmed == "/plan":
+        app.toggle_plan_mode()
         return True
     if trimmed.startswith("/summary"):
         app.handle_summary_command(trimmed[len("/summary"):], cancel_event=cancel_event, on_response=on_response)
