@@ -52,7 +52,7 @@ from localcoder.sessions import list_sessions, load_session, save_session
 from localcoder.skills import create_skill, format_skill, list_skills, load_skill
 from localcoder.symbols import find_definition, find_references
 from localcoder.terminal import TerminalError, argv_with_session, open_new_terminal
-from localcoder.tools import execute_tool, get_tools, needs_confirmation
+from localcoder.tools import execute_tool, extract_fallback_tool_call, get_tools, needs_confirmation
 
 # Deliberately short — every extra sentence here is tokens on every request.
 SYSTEM_PROMPT = (
@@ -71,6 +71,20 @@ SOCRATIC_PROMPT = (
     "giving direct answers. You must NOT display, print, or write any code snippets or code blocks. "
     "Guide the user step-by-step to find and write the code themselves, revealing code only if they explicitly ask to just show it. "
     "Stay collaborative and encouraging, not a quiz."
+)
+
+# Appended on top of SYSTEM_PROMPT when plan_mode is on. Write tools are
+# blocked client-side (see run_turn), but the model isn't told that anywhere
+# else — without this it just tries the write tool, gets an error payload,
+# and only then explains itself, which reads as plan mode "not working".
+# This tells it up front to investigate read-only and hand back an actual
+# plan in its text reply instead of attempting writes at all.
+PLAN_MODE_PROMPT = (
+    "Plan mode is on: write tools (write_file, edit_file, run_shell, run_shell_background, "
+    "stop_background_task) are blocked and will fail if you call them. Do not attempt them. "
+    "Instead, use read-only tools to investigate, then reply with a concrete step-by-step plan "
+    "(files to change, commands to run, in order) for the user to review. Wait for the user to "
+    "turn plan mode off before taking any write action."
 )
 
 MAX_TOOL_ROUNDS = 8
@@ -262,6 +276,8 @@ class App:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if self.socratic:
             messages.append({"role": "system", "content": SOCRATIC_PROMPT})
+        if self.plan_mode:
+            messages.append({"role": "system", "content": PLAN_MODE_PROMPT})
         if self.active_role and not self.active_role.get("error"):
             messages.append({"role": "system", "content": format_role(self.active_role)})
         for skill in self.active_skills:
@@ -302,7 +318,38 @@ class App:
         while True:
             rounds += 1
             if rounds > MAX_TOOL_ROUNDS:
-                self.out.warn(f"[localcoder] Stopping after {MAX_TOOL_ROUNDS} tool rounds to avoid a runaway loop.")
+                self.out.warn(f"[localcoder] Hit the {MAX_TOOL_ROUNDS}-round tool limit — asking for a summary of progress so far.")
+                self.conversation.append({
+                    "role": "user",
+                    "content": (
+                        "[system] You've reached the tool-call limit for this turn. Stop calling tools now. "
+                        "Reply with a short summary of what you actually completed, and what (if anything) is left to do."
+                    ),
+                })
+                self.out.assistant_label()
+                try:
+                    result = chat(
+                        host=self.config.host,
+                        model=self.config.model,
+                        messages=self.build_messages(),
+                        tools=[],
+                        num_ctx=self.config.num_ctx,
+                        temperature=self.config.temperature,
+                        on_token=self.out.token,
+                        cancel_event=cancel_event,
+                        on_response=on_response,
+                    )
+                except OllamaCancelled:
+                    self.out.newline()
+                    self.out.warn("[localcoder] Generation interrupted.")
+                    self.conversation.append({"role": "assistant", "content": "[interrupted by user]"})
+                    return
+                except (OllamaError, OllamaToolsUnsupported) as e:
+                    self.out.newline()
+                    self.out.err(self.format_error(e))
+                    return
+                self.out.newline()
+                self.conversation.append({"role": "assistant", "content": result["content"]})
                 return
 
             self.out.assistant_label()
@@ -366,10 +413,17 @@ class App:
 
             tool_calls = result.get("tool_calls")
             if not tool_calls:
-                self.conversation.append({"role": "assistant", "content": result["content"]})
-                return
-
-            self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
+                fallback = extract_fallback_tool_call(result.get("content") or "")
+                if fallback is None:
+                    self.conversation.append({"role": "assistant", "content": result["content"]})
+                    return
+                # Model printed the call as JSON text instead of using the
+                # structured tool-calling field — dispatch it anyway rather
+                # than showing raw JSON and ending the turn with nothing done.
+                tool_calls = [{"id": None, "function": {"name": fallback["name"], "arguments": fallback["arguments"]}}]
+                self.conversation.append({"role": "assistant", "content": "", "tool_calls": tool_calls})
+            else:
+                self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
 
             for i, call in enumerate(tool_calls):
                 fn = call.get("function") or {}
@@ -883,13 +937,20 @@ class App:
         if not results:
             self.out.info("[search] (no matches, even by meaning)")
             return
-        for r in results:
+        for i, r in enumerate(results):
+            # A blank line between hits, plus a differently-colored header
+            # (ok, not dim) for the path/score line — otherwise every hit's
+            # header blends into the previous hit's snippet and the whole
+            # list reads as one undifferentiated block.
+            if i:
+                self.out.newline()
             # Show several lines of the actual chunk, not just its first line —
             # a single line is often a module docstring/comment, which reads as
             # "just doc, not code" even though the code follows right after it.
             lines = r["text"].strip("\n").splitlines()[:6]
             snippet = "\n".join(f"    {line}" for line in lines)
-            self.out.info(f"  {r['path']}:{r['startLine']}-{r['endLine']} ({r['score']:.2f})\n{snippet}")
+            self.out.ok(f"  {r['path']}:{r['startLine']}-{r['endLine']} ({r['score']:.2f})")
+            self.out.info(snippet)
 
     def handle_find_command(self, rest: str) -> None:
         symbol = rest.strip()

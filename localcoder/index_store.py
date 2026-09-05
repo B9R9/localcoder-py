@@ -21,6 +21,14 @@ CHUNK_OVERLAP = 8
 MAX_FILES = 2000  # safety cap, not a tuning knob
 DEFAULT_INDEX_NAME = "default"
 
+# Prose/data files (docs, but also i18n locale files and JSON/YAML content
+# fixtures) are written in the same natural language as a semantic query, so
+# they often out-score the actual code that computes or uses them ("returns
+# doc, not code"). Nudge these down rather than excluding them outright —
+# still findable, just not ahead of equally-relevant code.
+DOC_EXTENSIONS = {".md", ".json", ".yaml", ".yml"}
+DOC_PENALTY = 0.85
+
 IGNORE_DIRS = {"node_modules", ".git", "dist", "build", ".next", ".nuxt", "coverage", ".localcoder"}
 INDEXABLE_EXT = {
     ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue",
@@ -170,6 +178,7 @@ def semantic_search(query: str, cwd: Path, host: str, model: str, top_k: int = 8
 
     scored = []
     for path, file in idx["files"].items():
+        penalty = DOC_PENALTY if Path(path).suffix in DOC_EXTENSIONS else 1.0
         for chunk in file["chunks"]:
             scored.append(
                 {
@@ -177,7 +186,7 @@ def semantic_search(query: str, cwd: Path, host: str, model: str, top_k: int = 8
                     "startLine": chunk["startLine"],
                     "endLine": chunk["endLine"],
                     "text": chunk["text"],
-                    "score": cosine_similarity(query_embedding, chunk["embedding"]),
+                    "score": cosine_similarity(query_embedding, chunk["embedding"]) * penalty,
                 }
             )
     scored.sort(key=lambda r: r["score"], reverse=True)
