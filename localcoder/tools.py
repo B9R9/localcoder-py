@@ -36,6 +36,22 @@ def _truncate(text: str) -> str:
     return text[:MAX_OUTPUT_CHARS] + f"\n...[truncated, {len(text) - MAX_OUTPUT_CHARS} more chars]"
 
 
+def _resolve_within_cwd(cwd: Path, path: str) -> Path | None:
+    """Resolve a model-supplied path and confirm it lands inside cwd. Every
+    tool here is driven by the model's own tool calls (unlike /context or
+    /browse, which take paths the human typed), so without this a prompt
+    injected via file/web content could point read_file at ~/.ssh/id_rsa or
+    write_file outside the project — silently for reads, since those need no
+    confirmation. Returns None if the path escapes cwd.
+    """
+    full = (cwd / path).resolve()
+    try:
+        full.relative_to(cwd.resolve())
+    except ValueError:
+        return None
+    return full
+
+
 def _search_code_without_ripgrep(cwd: Path, search_path: str, pattern: str, max_matches: int = 200) -> dict:
     """Fallback for search_code when ripgrep isn't installed — a pure-Python
     walk-and-regex-search instead of shelling out to the system `grep`.
@@ -240,7 +256,9 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
     cwd: Path = ctx["cwd"]
 
     if name == "read_file":
-        full = (cwd / args["path"]).resolve()
+        full = _resolve_within_cwd(cwd, args["path"])
+        if full is None:
+            return {"error": f"Path escapes the project root: {args['path']}"}
         if not full.exists():
             return {"error": f"File not found: {args['path']}"}
         try:
@@ -250,7 +268,9 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
 
     if name == "list_dir":
         rel = args.get("path") or "."
-        full = (cwd / rel).resolve()
+        full = _resolve_within_cwd(cwd, rel)
+        if full is None:
+            return {"error": f"Path escapes the project root: {rel}"}
         if not full.exists():
             return {"error": f"Path not found: {rel}"}
         try:
@@ -263,6 +283,8 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
 
     if name == "search_code":
         search_path = args.get("path") or "."
+        if _resolve_within_cwd(cwd, search_path) is None:
+            return {"error": f"Path escapes the project root: {search_path}"}
         if not (cwd / search_path).exists():
             return {"error": f"Path not found: {search_path}"}
         try:
@@ -290,7 +312,9 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
             return {"error": str(err)}
 
     if name == "edit_file":
-        full = (cwd / args["path"]).resolve()
+        full = _resolve_within_cwd(cwd, args["path"])
+        if full is None:
+            return {"error": f"Path escapes the project root: {args['path']}"}
         if not full.exists():
             return {"error": f"File not found: {args['path']}"}
         try:
@@ -307,7 +331,9 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
             return {"error": str(err)}
 
     if name == "write_file":
-        full = (cwd / args["path"]).resolve()
+        full = _resolve_within_cwd(cwd, args["path"])
+        if full is None:
+            return {"error": f"Path escapes the project root: {args['path']}"}
         try:
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text(args["content"], encoding="utf-8")

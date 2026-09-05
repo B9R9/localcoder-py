@@ -38,6 +38,47 @@ def test_search_code_excludes_node_modules(tmp_path):
     assert "node_modules" not in result["matches"]
 
 
+def test_read_file_rejects_path_outside_project(tmp_path):
+    cwd = _fixture(tmp_path)
+    secret = tmp_path.parent / "secret.txt"
+    secret.write_text("top secret")
+
+    result = execute_tool("read_file", {"path": "../secret.txt"}, {"cwd": cwd})
+    assert "error" in result
+    assert "escapes" in result["error"]
+
+
+def test_write_file_rejects_path_outside_project(tmp_path):
+    cwd = _fixture(tmp_path)
+    result = execute_tool("write_file", {"path": "../escaped.txt", "content": "x"}, {"cwd": cwd})
+    assert "error" in result
+    assert not (tmp_path.parent / "escaped.txt").exists()
+
+
+def test_edit_file_rejects_path_outside_project(tmp_path):
+    cwd = _fixture(tmp_path)
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("hello")
+
+    result = execute_tool(
+        "edit_file", {"path": "../outside.txt", "old_string": "hello", "new_string": "hacked"}, {"cwd": cwd}
+    )
+    assert "error" in result
+    assert outside.read_text() == "hello"
+
+
+def test_list_dir_rejects_path_outside_project(tmp_path):
+    cwd = _fixture(tmp_path)
+    result = execute_tool("list_dir", {"path": ".."}, {"cwd": cwd})
+    assert "error" in result
+
+
+def test_search_code_rejects_path_outside_project(tmp_path):
+    cwd = _fixture(tmp_path)
+    result = execute_tool("search_code", {"pattern": "x", "path": ".."}, {"cwd": cwd})
+    assert "error" in result
+
+
 # search_code's ripgrep-less fallback used to shell out to the system `grep`
 # with `--exclude-dir` — a GNU-only flag that silently breaks on macOS's
 # bundled grep ("search option ne semble pas fonctionner"). It's now a
