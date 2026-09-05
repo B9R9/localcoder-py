@@ -36,6 +36,7 @@ from localcoder.roles import create_role, format_role, list_roles, load_role
 from localcoder.sessions import list_sessions, load_session, save_session
 from localcoder.skills import create_skill, format_skill, list_skills, load_skill
 from localcoder.symbols import find_definition, find_references
+from localcoder.terminal import TerminalError, argv_with_session, open_new_terminal
 from localcoder.tools import execute_tool, get_tools, needs_confirmation
 
 # Deliberately short — every extra sentence here is tokens on every request.
@@ -123,6 +124,7 @@ class PrintSink(OutputSink):
 
 class App:
     def __init__(self, argv: list[str], out: OutputSink | None = None):
+        self.argv = list(argv)
         self.config = load_config(argv)
         self.cwd = Path.cwd()
         self.out = out or PrintSink()
@@ -510,10 +512,17 @@ class App:
             self.out.ok(f'[session] Loaded "{name}" ({len(self.conversation)} messages, role: {saved.get("role") or "none"}).')
             return
         if sub == "new" and name:
-            self.current_session_name = name
-            self.conversation = []
-            self.autosave()
-            self.out.ok(f'[session] Started new session "{name}".')
+            command = [sys.executable, "-m", "localcoder", *argv_with_session(self.argv, name)]
+            try:
+                open_new_terminal(self.cwd, command)
+            except TerminalError as err:
+                self.out.warn(f"[session] Couldn't open a new terminal ({err}) — starting here instead.")
+                self.current_session_name = name
+                self.conversation = []
+                self.autosave()
+                self.out.ok(f'[session] Started new session "{name}".')
+                return
+            self.out.ok(f'[session] Opened new session "{name}" in a new terminal.')
             return
         if sub == "list":
             names = list_sessions(self.cwd)

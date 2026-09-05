@@ -93,4 +93,9 @@ def browse_entries(cwd: Path, partial: str) -> list[str]:
     if prefix:
         names = [n for n in names if n.lower().startswith(prefix.lower())]
 
-    return [_join(rel_dir, n) for n in names]
+    result = [_join(rel_dir, n) for n in names]
+    if rel_dir and not prefix:
+        dir_entry = rel_dir if rel_dir.endswith("/") else f"{rel_dir}/"
+        if dir_entry not in result:
+            result.insert(0, dir_entry)
+    return result

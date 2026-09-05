@@ -90,7 +90,7 @@ def test_dynamic_file_picker_starts_at_the_browse_root():
     items = compute_menu_items("/context add ", LISTS)
     assert [i.value for i in items] == ["/context add src/", "/context add README.md"]
     src_item = next(i for i in items if i.value == "/context add src/")
-    assert src_item.submit is False  # a directory — keep tabbing deeper
+    assert src_item.submit is True  # a directory can also be selected as context
     file_item = next(i for i in items if i.value == "/context add README.md")
     assert file_item.submit is True  # a file — pick it
 

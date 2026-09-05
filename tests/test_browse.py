@@ -34,13 +34,13 @@ def test_browsing_with_no_input_starts_at_src(tmp_path):
     entries = browse_entries(tmp_path, "")
     # directories first, node_modules/.git excluded entirely — this is the
     # project's src/ folder, not its root.
-    assert entries == ["src/components/", "src/auth.js", "src/index.mjs"]
+    assert entries == ["src/", "src/components/", "src/auth.js", "src/index.mjs"]
 
 
 def test_browsing_descends_into_a_typed_subdirectory(tmp_path):
     _make_project(tmp_path)
     entries = browse_entries(tmp_path, "src/components/")
-    assert entries == ["src/components/Foo.vue"]
+    assert entries == ["src/components/", "src/components/Foo.vue"]
 
 
 def test_browsing_filters_by_prefix_within_a_directory(tmp_path):
@@ -68,7 +68,7 @@ def test_browsing_an_absolute_path_reaches_anywhere_on_disk(tmp_path):
     (other / "config.json").write_text("{}")
 
     entries = browse_entries(tmp_path, f"{other}/")
-    assert entries == [f"{other}/config.json"]
+    assert entries == [f"{other}/", f"{other}/config.json"]
 
 
 def test_browsing_a_home_relative_path_expands_it(tmp_path, monkeypatch):
@@ -92,3 +92,10 @@ def test_falls_back_to_project_root_when_no_src_or_source(tmp_path):
     (tmp_path / "top.txt").write_text("")
     entries = browse_entries(tmp_path, "")
     assert entries == ["lib/", "top.txt"]
+
+
+def test_browsing_includes_directory_itself_when_navigating_subfolder(tmp_path):
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "a.py").write_text("")
+    entries = browse_entries(tmp_path, "lib/")
+    assert entries == ["lib/", "lib/a.py"]

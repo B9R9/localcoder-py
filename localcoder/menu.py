@@ -24,7 +24,7 @@ TOP_COMMANDS = [
     {"cmd": "/index status", "desc": "Show how many files/chunks are indexed and when it was last built", "arg": None},
     {"cmd": "/session save", "desc": "Name (if needed) and save the current thread so it can be resumed later", "arg": "free"},
     {"cmd": "/session load", "desc": "Resume a saved thread — its history, role, context and skills", "arg": "session"},
-    {"cmd": "/session new", "desc": "Start a fresh named thread, discarding the current in-memory history", "arg": "free"},
+    {"cmd": "/session new", "desc": "Open a fresh named thread in a new terminal window, alongside this one", "arg": "free"},
     {"cmd": "/session list", "desc": "List every thread saved for this project", "arg": None},
     {"cmd": "/role use", "desc": "Switch the active role (persona) — replaces any role already in use", "arg": "role"},
     {"cmd": "/role list", "desc": "List roles available in roles/ and ~/.localcoder/roles/", "arg": None},
@@ -96,7 +96,7 @@ def compute_menu_items(buffer: str, lists: Optional[dict[str, Callable]] = None)
         if key in _PARTIAL_AWARE_KEYS:
             names = getter(partial) or []
             # The getter already applied its own directory-aware filtering.
-            return [MenuItem(display=name, value=prefix + name, submit=not name.endswith("/")) for name in names]
+            return [MenuItem(display=name, value=prefix + name, submit=True) for name in names]
 
         names = getter() or []
         partial_lower = partial.lower()
