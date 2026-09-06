@@ -389,6 +389,16 @@ WRITE_TOOLS = {
     "spawn_coding_subagents",
 }
 
+# Every tool name that can ever appear in a request, regardless of whether
+# the current project/model combination actually advertises it — used to
+# recognize a model that hallucinated a tool call as plain text instead of
+# using real tool-calling (see repl.py's _looks_like_untriggered_tool_call).
+TOOL_NAMES = sorted(
+    {t["function"]["name"] for t in BASE_TOOLS}
+    | {SEMANTIC_SEARCH_TOOL["function"]["name"]}
+    | {t["function"]["name"] for t in SYMBOL_TOOLS}
+)
+
 
 def get_tools(cwd: Path, index_name: str = "default", graph_name: str = "default") -> list[dict]:
     tools = list(BASE_TOOLS)

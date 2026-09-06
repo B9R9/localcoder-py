@@ -253,3 +253,49 @@ def test_relaunch_reexecs_the_same_interpreter_module_and_args(monkeypatch):
     assert calls == [
         ("/usr/bin/python3", ["/usr/bin/python3", "-m", "localcoder", "--no-warm-up"])
     ]
+
+
+def test_run_turn_warns_when_model_fakes_a_tool_call_as_plain_text(tmp_path, monkeypatch):
+    """A weak model that doesn't use real tool-calling can hallucinate the
+    tool-call JSON shape directly into `content` instead. Nothing runs in
+    that case (no `tool_calls` on the response), so the user should be told
+    the turn actually failed rather than seeing the raw JSON silently
+    presented as a normal reply."""
+    from localcoder import repl as repl_module
+
+    app = _make_app(tmp_path, monkeypatch)
+    app.conversation.append({"role": "user", "content": "change the vault icon to a lock"})
+    warnings = []
+    app.out.warn = warnings.append
+
+    fake_reply = '{"name": "search_code", "arguments": {"pattern": "vault icon"}}'
+    monkeypatch.setattr(
+        repl_module,
+        "chat",
+        lambda **kwargs: {"content": fake_reply, "tool_calls": None, "done_meta": None},
+    )
+
+    app.run_turn(confirm_fn=lambda _q: True)
+
+    assert len(warnings) == 1
+    assert "tried to call a tool as plain text" in warnings[0]
+    assert app.conversation[-1] == {"role": "assistant", "content": fake_reply}
+
+
+def test_run_turn_does_not_warn_on_an_ordinary_prose_reply(tmp_path, monkeypatch):
+    from localcoder import repl as repl_module
+
+    app = _make_app(tmp_path, monkeypatch)
+    app.conversation.append({"role": "user", "content": "what does this function do?"})
+    warnings = []
+    app.out.warn = warnings.append
+
+    monkeypatch.setattr(
+        repl_module,
+        "chat",
+        lambda **kwargs: {"content": "It reads the file and returns its contents.", "tool_calls": None, "done_meta": None},
+    )
+
+    app.run_turn(confirm_fn=lambda _q: True)
+
+    assert warnings == []

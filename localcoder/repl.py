@@ -63,7 +63,7 @@ from localcoder.skills import create_skill, format_skill, list_skills, load_skil
 from localcoder.subagents import run_graph_turn
 from localcoder.symbols import find_definition, find_references
 from localcoder.terminal import TerminalError, argv_with_session, open_new_terminal
-from localcoder.tools import execute_tool, extract_fallback_tool_call, get_tools, needs_confirmation
+from localcoder.tools import TOOL_NAMES, execute_tool, get_tools, needs_confirmation
 
 # Deliberately short — every extra sentence here is tokens on every request.
 SYSTEM_PROMPT = (
@@ -127,6 +127,27 @@ _AT_MENTION = re.compile(r"@([^\s@]+)")
 # cancels. Works identically whether stdin is a pipe or a real terminal.
 _CAPTURE_SAVE = "."
 _CAPTURE_CANCEL = "!"
+
+_FAKE_TOOL_CALL = re.compile(
+    r'\{\s*"name"\s*:\s*"(?:' + "|".join(re.escape(name) for name in TOOL_NAMES) + r')"\s*,\s*"arguments"\s*:'
+)
+
+
+def _looks_like_untriggered_tool_call(content: str) -> bool:
+    return bool(content) and bool(_FAKE_TOOL_CALL.search(content))
+
+# Some smaller/weaker models don't reliably use Ollama's native tool-calling
+# and instead hallucinate the tool-call JSON shape directly into `content` —
+# which then just prints as a normal reply, silently, with nothing actually
+# executed. Recognize that shape so run_turn can warn instead of pretending
+# the turn succeeded.
+_FAKE_TOOL_CALL = re.compile(
+    r'\{\s*"name"\s*:\s*"(?:' + "|".join(re.escape(n) for n in TOOL_NAMES) + r')"\s*,\s*"arguments"\s*:'
+)
+
+
+def _looks_like_untriggered_tool_call(content: str) -> bool:
+    return bool(content) and bool(_FAKE_TOOL_CALL.search(content))
 
 
 class OutputSink:
@@ -457,22 +478,21 @@ class App:
 
             tool_calls = result.get("tool_calls")
             if not tool_calls:
-                fallback = extract_fallback_tool_call(result.get("content") or "")
-                if fallback is None:
-                    self.conversation.append({"role": "assistant", "content": result["content"]})
-                    if self.loop_mode and not did_verify_pass:
-                        did_verify_pass = True
-                        self.out.info("[loop mode] Reached the end — looping back to verify the work.")
-                        self.conversation.append({"role": "user", "content": LOOP_VERIFY_MESSAGE})
-                        continue
-                    return
-                # Model printed the call as JSON text instead of using the
-                # structured tool-calling field — dispatch it anyway rather
-                # than showing raw JSON and ending the turn with nothing done.
-                tool_calls = [{"id": None, "function": {"name": fallback["name"], "arguments": fallback["arguments"]}}]
-                self.conversation.append({"role": "assistant", "content": "", "tool_calls": tool_calls})
-            else:
-                self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
+                if _looks_like_untriggered_tool_call(result["content"]):
+                    self.out.warn(
+                        f"[localcoder] {self.config.model} tried to call a tool as plain text instead of "
+                        "using real tool-calling — nothing was executed. This model may not reliably "
+                        "support tool-calling; try /model use to switch to one that does."
+                    )
+                self.conversation.append({"role": "assistant", "content": result["content"]})
+                if self.loop_mode and not did_verify_pass:
+                    did_verify_pass = True
+                    self.out.info("[loop mode] Reached the end — looping back to verify the work.")
+                    self.conversation.append({"role": "user", "content": LOOP_VERIFY_MESSAGE})
+                    continue
+                return
+
+            self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
 
             for i, call in enumerate(tool_calls):
                 fn = call.get("function") or {}
