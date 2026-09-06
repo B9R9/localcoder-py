@@ -288,6 +288,37 @@ BASE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_coding_subagents",
+            "description": (
+                "Delegate one or more code-writing tasks to sub-agents that each work on their own isolated "
+                "git branch and working copy (via `git worktree`), branched off a shared work branch that "
+                "is itself branched off your current branch. Tasks run in parallel (capped, /set "
+                "max_subagents) and each sub-agent may write files and run shell commands freely without "
+                "further confirmation — safe because each is confined to its own disposable branch that "
+                "nothing else touches. When every task finishes, its branch is committed and merged into "
+                "the shared work branch (a conflicting merge is reported, not silently dropped) — but that "
+                "work branch is NEVER merged into your current branch automatically. To bring the result "
+                "in, review it and use run_shell yourself (e.g. `git merge <work_branch>`), which still "
+                "requires the user's confirmation like any other write. Requires the project to already be "
+                "a git repository, and only sees COMMITTED changes — commit or stash first if you have "
+                "uncommitted edits you want the sub-agents to see."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "One or more self-contained code-change task descriptions — each becomes its own branch/worktree.",
+                    }
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
 ]
 
 SEMANTIC_SEARCH_TOOL = {
@@ -330,7 +361,18 @@ SYMBOL_TOOLS = [
     },
 ]
 
-WRITE_TOOLS = {"write_file", "edit_file", "run_shell", "run_shell_background", "stop_background_task"}
+WRITE_TOOLS = {
+    "write_file",
+    "edit_file",
+    "run_shell",
+    "run_shell_background",
+    "stop_background_task",
+    # spawn_coding_subagents' own branches/worktrees are auto-approved once
+    # it's running (see coding_subagent.py) — but launching the whole fan-out
+    # is itself a write-capable action, so it goes through the same one-time
+    # confirmation as write_file/edit_file/run_shell before it starts.
+    "spawn_coding_subagents",
+}
 
 
 def get_tools(cwd: Path, index_name: str = "default") -> list[dict]:
@@ -501,5 +543,10 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
         from localcoder.subagent import run_subagents  # lazy: subagent.py imports from this module
 
         return run_subagents(args["tasks"], ctx, cancel_event=ctx.get("cancel_event"))
+
+    if name == "spawn_coding_subagents":
+        from localcoder.coding_subagent import run_coding_subagents  # lazy: imports from this module
+
+        return run_coding_subagents(args["tasks"], ctx, cancel_event=ctx.get("cancel_event"))
 
     return {"error": f"Unknown tool: {name}"}
