@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from localcoder.graph_store import graph_neighbors, graph_stats
 from localcoder.index_store import index_stats, semantic_search
 from localcoder.symbols import find_definition, find_references, has_ctags
 
@@ -254,6 +255,19 @@ SEMANTIC_SEARCH_TOOL = {
     },
 }
 
+GRAPH_NEIGHBORS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "graph_neighbors",
+        "description": "Look up the direct import relationships of one file from the built code graph: files it imports, and files that import it. One hop per call — call again on a returned neighbor to go further. Use this to navigate a large codebase without reading every file.",
+        "parameters": {
+            "type": "object",
+            "properties": {"file": {"type": "string", "description": "Project-relative path of the file to look up."}},
+            "required": ["file"],
+        },
+    },
+}
+
 SYMBOL_TOOLS = [
     {
         "type": "function",
@@ -284,10 +298,12 @@ SYMBOL_TOOLS = [
 WRITE_TOOLS = {"write_file", "edit_file", "run_shell", "run_shell_background", "stop_background_task"}
 
 
-def get_tools(cwd: Path, index_name: str = "default") -> list[dict]:
+def get_tools(cwd: Path, index_name: str = "default", graph_name: str = "default") -> list[dict]:
     tools = list(BASE_TOOLS)
     if index_stats(cwd, index_name):
         tools.append(SEMANTIC_SEARCH_TOOL)
+    if graph_stats(cwd, graph_name):
+        tools.append(GRAPH_NEIGHBORS_TOOL)
     if has_ctags():
         tools.extend(SYMBOL_TOOLS)
     return tools
@@ -300,6 +316,7 @@ def needs_confirmation(name: str) -> bool:
 ALL_TOOL_NAMES = (
     {t["function"]["name"] for t in BASE_TOOLS}
     | {SEMANTIC_SEARCH_TOOL["function"]["name"]}
+    | {GRAPH_NEIGHBORS_TOOL["function"]["name"]}
     | {t["function"]["name"] for t in SYMBOL_TOOLS}
 )
 
@@ -444,6 +461,12 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
                 for r in result["results"]
             ]
         }
+
+    if name == "graph_neighbors":
+        result = graph_neighbors(args["file"], cwd=cwd, name=ctx.get("graph_name", "default"))
+        if "error" in result:
+            return result
+        return {"imports": result["imports"], "importedBy": result["importedBy"]}
 
     if name == "find_definition":
         return find_definition(args["symbol"], cwd)

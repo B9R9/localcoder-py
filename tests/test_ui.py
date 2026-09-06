@@ -41,10 +41,12 @@ def test_verbose_stats_fragments_contain_all_metrics():
 
 def test_banner_fragments_show_lazzy_and_skills():
     class FakeConfig:
+        provider = "ollama"
         model = "devstral-small-2"
         num_ctx = 8192
         temperature = 0.2
         host = "http://localhost:11434"
+        base_url = "https://integrate.api.nvidia.com/v1"
 
     fragments = ui.banner_fragments(
         FakeConfig(),

@@ -247,3 +247,31 @@ def test_get_tools_advertises_symbol_tools_when_ctags_present(tmp_path, monkeypa
     assert "find_definition" in names
     assert "find_references" in names
     assert "semantic_search" not in names  # no index built for this tmp_path
+
+
+def test_get_tools_advertises_graph_neighbors_when_graph_built(tmp_path, monkeypatch):
+    from localcoder import graph_store
+
+    monkeypatch.setattr("localcoder.tools.has_ctags", lambda: False)
+    names = [t["function"]["name"] for t in get_tools(tmp_path)]
+    assert "graph_neighbors" not in names  # no graph map built yet
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    graph_store.build_graph(tmp_path)
+    names = [t["function"]["name"] for t in get_tools(tmp_path)]
+    assert "graph_neighbors" in names
+
+
+def test_execute_tool_graph_neighbors(tmp_path):
+    from localcoder import graph_store
+
+    (tmp_path / "a.py").write_text("from b import x\n")
+    (tmp_path / "b.py").write_text("value = 1\n")
+    graph_store.build_graph(tmp_path)
+
+    ctx = {"cwd": tmp_path, "graph_name": "default"}
+    result = execute_tool("graph_neighbors", {"file": "a.py"}, ctx)
+    assert result["imports"] == ["b.py"]
+
+    result = execute_tool("graph_neighbors", {"file": "missing.py"}, ctx)
+    assert "error" in result

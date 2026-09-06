@@ -275,11 +275,13 @@ def banner_fragments(config, cwd, session_name, role, context_entries, idx_stats
     lines += [f"<box>{_esc(line)}</box>" for line in box.split("\n")]
     lines.append("")
 
+    endpoint = config.base_url if config.provider == "nvidia" else config.host
     lines.append(
-        f"<label>model</label> <value>{_esc(config.model)}</value>"
+        f"<label>provider</label> <value>{_esc(config.provider)}</value>"
+        f"   <label>model</label> <value>{_esc(config.model)}</value>"
         f"   <label>num_ctx</label> <value>{config.num_ctx}</value>"
         f"   <label>temperature</label> <value>{config.temperature}</value>"
-        f"   <label>host</label> <value>{_esc(config.host)}</value>"
+        f"   <label>host</label> <value>{_esc(endpoint)}</value>"
     )
     lines.append(f"<label>project</label> <value>{_esc(cwd)}</value>")
 
@@ -304,15 +306,16 @@ def banner_fragments(config, cwd, session_name, role, context_entries, idx_stats
         )
 
     lines.append(
-        "<dim>Commands: /index build|use|list|status  /session save|load|new|list  /role use|list|create|clear  "
+        "<dim>Commands: /index build|use|list|status|delete  /graph_map build|use|list|status|delete  /session save|load|new|list  /role use|list|create|clear  "
         "/skill use|list|create|clear  /context add|list|clear|save|load|sets  /model use|list  /set temperature|num_ctx  "
-        "/stats  /verbose  /debug  /socratic  /plan  /summary  /search  /find  /reset  /restart  /help  /exit</dim>"
+        "/stats  /verbose  /debug  /socratic  /plan  /loop  /graph  /summary  /search  /find  /reset  /restart  /help  /exit</dim>"
     )
     if interactive:
         lines.append(
             '<dim>Type "/" for a centered menu — ↑/↓ to move, Enter/Tab to pick, Esc to clear. '
             "@path in a message loads that file/dir into context. Ctrl+C cancels a reply in progress; "
-            "at an empty prompt, Ctrl+C or Ctrl+D quits. Ctrl+P toggles plan mode (blocks writes). "
+            "at an empty prompt, Ctrl+C or Ctrl+D quits. Ctrl+P toggles plan mode (blocks writes), "
+            "Ctrl+L toggles loop mode, Ctrl+G toggles graph mode. "
             "PageUp/PageDown scroll this pane (native "
             "copy/paste works normally, so the mouse is left alone).</dim>"
         )
@@ -349,6 +352,10 @@ def bottom_toolbar(state: dict):
         parts.append("debug")
     if state.get("plan_mode"):
         parts.append("plan mode")
+    if state.get("loop_mode"):
+        parts.append("loop mode")
+    if state.get("graph_mode"):
+        parts.append("graph mode")
     if state.get("tools_disabled"):
         parts.append("tools: off")
     num_ctx = state.get("num_ctx")

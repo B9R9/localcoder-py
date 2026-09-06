@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 DEFAULTS = {
+    "provider": "ollama",  # "ollama" (local) or "nvidia" (integrate.api.nvidia.com)
     "host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
     "model": "devstral-small-2",
     "num_ctx": 8192,
@@ -27,11 +28,19 @@ DEFAULTS = {
     "embed_model": "nomic-embed-text",  # used only by /index build + semantic_search
     "verbose": False,  # print an `ollama --verbose`-style breakdown after every turn
     "warm_up": True,  # preload the model at startup so the first real message isn't slow
+    "base_url": "https://integrate.api.nvidia.com/v1",  # only used when provider == "nvidia"
+    "api_key": os.environ.get("NVIDIA_API_KEY", ""),  # only used when provider == "nvidia"
 }
+
+# Used in place of DEFAULTS["model"] when provider is nvidia and nothing
+# (env, config file, or --model) picked a model explicitly — devstral-small-2
+# is an Ollama model name and isn't valid against NVIDIA's catalog.
+NVIDIA_DEFAULT_MODEL = "moonshotai/kimi-k3"
 
 
 @dataclass
 class Config:
+    provider: str = DEFAULTS["provider"]
     host: str = DEFAULTS["host"]
     model: str = DEFAULTS["model"]
     num_ctx: int = DEFAULTS["num_ctx"]
@@ -43,6 +52,8 @@ class Config:
     embed_model: str = DEFAULTS["embed_model"]
     verbose: bool = DEFAULTS["verbose"]
     warm_up: bool = DEFAULTS["warm_up"]
+    base_url: str = DEFAULTS["base_url"]
+    api_key: str = DEFAULTS["api_key"]
 
 
 def _load_json_if_exists(path: Path) -> dict:
@@ -63,9 +74,18 @@ def _parse_flags(argv: list[str]) -> tuple[dict, list[str]]:
         if arg == "--model":
             i += 1
             flags["model"] = argv[i]
+        elif arg == "--provider":
+            i += 1
+            flags["provider"] = argv[i]
         elif arg == "--host":
             i += 1
             flags["host"] = argv[i]
+        elif arg == "--base-url":
+            i += 1
+            flags["base_url"] = argv[i]
+        elif arg == "--api-key":
+            i += 1
+            flags["api_key"] = argv[i]
         elif arg == "--num-ctx":
             i += 1
             flags["num_ctx"] = int(argv[i])
@@ -99,7 +119,14 @@ def load_config(argv: list[str]) -> Config:
     local_config = _load_json_if_exists(Path.cwd() / "localcoder.json")
     flags, context_flags = _parse_flags(argv)
 
-    merged = {**DEFAULTS, **global_config, **local_config, **flags}
+    # Read fresh (rather than relying on the DEFAULTS entry baked in at
+    # import time) so a key exported after the process started — or changed
+    # between calls in tests — is actually picked up.
+    merged = {**DEFAULTS, "api_key": os.environ.get("NVIDIA_API_KEY", ""), **global_config, **local_config, **flags}
+
+    model_explicit = "model" in global_config or "model" in local_config or "model" in flags
+    if merged.get("provider") == "nvidia" and not model_explicit:
+        merged["model"] = NVIDIA_DEFAULT_MODEL
 
     combined_context = [
         *global_config.get("context", []),
