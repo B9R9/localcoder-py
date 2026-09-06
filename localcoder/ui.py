@@ -200,6 +200,26 @@ def tool_result_fragment(result: dict) -> str:
     return f"<dim>  → {_esc(rendered)}</dim>"
 
 
+# Status glyphs for todo_list_fragment — plain ASCII/box-drawing rather than
+# emoji so alignment and coloring stay predictable across terminal fonts.
+_TODO_GLYPH = {"completed": ("✓", "ok"), "in_progress": ("▶", "warn"), "pending": ("○", "dim")}
+
+
+def todo_list_fragment(todos: list[dict]) -> str:
+    """Renders the model's current checklist (from todo_write) as a small
+    status list, so progress — and exactly where the agent stalls — stays
+    visible turn over turn instead of scrolling past as one more truncated
+    tool-result blob.
+    """
+    if not todos:
+        return "<dim>  (todo list empty)</dim>"
+    lines = []
+    for item in todos:
+        glyph, style = _TODO_GLYPH.get(item.get("status"), ("?", "dim"))
+        lines.append(f"  <{style}>{glyph} {_esc(item.get('content', ''))}</{style}>")
+    return "\n".join(lines)
+
+
 def info_fragment(text: str) -> str:
     return f"<dim>{_esc(text)}</dim>"
 
@@ -382,6 +402,10 @@ def tool_call(name: str, args: dict) -> None:
 
 def tool_result(result: dict) -> None:
     _print(tool_result_fragment(result))
+
+
+def todo_list(todos: list[dict]) -> None:
+    _print(todo_list_fragment(todos))
 
 
 def info(text: str) -> None:

@@ -321,6 +321,35 @@ BASE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": (
+                "Create or replace your task checklist for this turn. Call it before starting multi-step "
+                "work and again whenever a step's status changes, so progress survives many tool rounds "
+                "instead of getting lost. Always pass the FULL list — it replaces the previous one. Keep "
+                "at most one item 'in_progress' at a time."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                            },
+                            "required": ["content", "status"],
+                        },
+                    }
+                },
+                "required": ["todos"],
+            },
+        },
+    },
 ]
 
 SEMANTIC_SEARCH_TOOL = {
@@ -578,6 +607,21 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
         if "error" in result:
             return result
         return {"matches": _truncate(result["matches"])}
+
+    if name == "todo_write":
+        todos = args.get("todos")
+        if not isinstance(todos, list):
+            return {"error": "todos must be a list."}
+        normalized = []
+        for item in todos:
+            if not isinstance(item, dict) or "content" not in item or "status" not in item:
+                return {"error": "Each todo needs 'content' and 'status'."}
+            if item["status"] not in ("pending", "in_progress", "completed"):
+                return {"error": f"Invalid status: {item['status']!r}"}
+            normalized.append({"content": str(item["content"]), "status": item["status"]})
+        store = ctx.setdefault("todos", [])
+        store[:] = normalized
+        return {"ok": True, "todos": store}
 
     if name == "run_shell":
         try:

@@ -70,7 +70,8 @@ SYSTEM_PROMPT = (
     "You are a terminal coding assistant working in the user's project directory. "
     "Use search_code and list_dir to locate relevant code before reading it. "
     "Prefer edit_file (targeted replace) over write_file for changes to existing files — "
-    "only use write_file for new files or full rewrites. Keep replies short. "
+    "only use write_file for new files or full rewrites. For any multi-step task, keep your "
+    "checklist current with todo_write so progress isn't lost across many tool calls. Keep replies short. "
     "Before a destructive action (editing/overwriting a file, running a command that changes state), "
     "briefly say what you're about to do."
 )
@@ -93,9 +94,11 @@ SOCRATIC_PROMPT = (
 PLAN_MODE_PROMPT = (
     "Plan mode is on: write tools (write_file, edit_file, run_shell, run_shell_background, "
     "stop_background_task) are blocked and will fail if you call them. Do not attempt them. "
-    "Instead, use read-only tools to investigate, then reply with a concrete step-by-step plan "
-    "(files to change, commands to run, in order) for the user to review. Wait for the user to "
-    "turn plan mode off before taking any write action."
+    "Instead, use read-only tools to investigate thoroughly, then use todo_write to build a full "
+    "checklist of every concrete step the work will need (files to change, commands to run, in "
+    "order) — go deeper than you would in normal mode; a shallow 2-3 item list is not acceptable "
+    "here. Then reply with a clear step-by-step plan derived from that checklist for the user to "
+    "review. Wait for the user to turn plan mode off before taking any write action."
 )
 
 # Appended on top of SYSTEM_PROMPT when loop_mode is on — tells the model up
@@ -115,8 +118,6 @@ LOOP_VERIFY_MESSAGE = (
     "incomplete. If everything checks out, say so briefly and stop — do not keep looping."
 )
 
-MAX_TOOL_ROUNDS = 8
-
 # @path references in a typed message — a lightweight shortcut for
 # /context add that works inline. Stops at whitespace or trailing
 # punctuation so "check @src/auth.js." doesn't swallow the period.
@@ -127,14 +128,6 @@ _AT_MENTION = re.compile(r"@([^\s@]+)")
 # cancels. Works identically whether stdin is a pipe or a real terminal.
 _CAPTURE_SAVE = "."
 _CAPTURE_CANCEL = "!"
-
-_FAKE_TOOL_CALL = re.compile(
-    r'\{\s*"name"\s*:\s*"(?:' + "|".join(re.escape(name) for name in TOOL_NAMES) + r')"\s*,\s*"arguments"\s*:'
-)
-
-
-def _looks_like_untriggered_tool_call(content: str) -> bool:
-    return bool(content) and bool(_FAKE_TOOL_CALL.search(content))
 
 # Some smaller/weaker models don't reliably use Ollama's native tool-calling
 # and instead hallucinate the tool-call JSON shape directly into `content` —
@@ -164,6 +157,7 @@ class OutputSink:
     def newline(self) -> None: ...
     def tool_call(self, name: str, args: dict) -> None: ...
     def tool_result(self, result: dict) -> None: ...
+    def todo_list(self, todos: list[dict]) -> None: ...
     def verbose_stats(self, meta: dict) -> None: ...
     def info(self, text: str) -> None: ...
     def ok(self, text: str) -> None: ...
@@ -187,6 +181,9 @@ class PrintSink(OutputSink):
 
     def tool_result(self, result: dict) -> None:
         ui.tool_result(result)
+
+    def todo_list(self, todos: list[dict]) -> None:
+        ui.todo_list(todos)
 
     def verbose_stats(self, meta: dict) -> None:
         ui.verbose_stats(meta)
@@ -273,6 +270,12 @@ class App:
         # combine the results. Toggle with /loop or Ctrl+L, /graph or Ctrl+G.
         self.loop_mode = False
         self.graph_mode = False
+
+        # todos: the model's own task checklist for the turn in progress,
+        # written via the todo_write tool (see tools.py) and reset at the
+        # start of every run_turn — a scratchpad so multi-step work doesn't
+        # lose track of itself across many tool rounds, not turn history.
+        self.todos: list[dict] = []
 
         # tools_supported: not every model on the Hub does tool-calling
         # (plenty are chat-only) — flips to False the first time Ollama
@@ -363,6 +366,7 @@ class App:
             "background": self.background,
             "cancel_event": cancel_event,
             "max_subagents": self.config.max_subagents,
+            "todos": self.todos,
         }
 
     def toolbar_state(self) -> dict:
@@ -386,40 +390,9 @@ class App:
     def run_turn(self, confirm_fn, cancel_event=None, on_response=None) -> None:
         rounds = 0
         did_verify_pass = False
+        self.todos = []  # fresh checklist for this turn — see todo_write in tools.py
         while True:
             rounds += 1
-            if rounds > MAX_TOOL_ROUNDS:
-                self.out.warn(f"[localcoder] Hit the {MAX_TOOL_ROUNDS}-round tool limit — asking for a summary of progress so far.")
-                self.conversation.append({
-                    "role": "user",
-                    "content": (
-                        "[system] You've reached the tool-call limit for this turn. Stop calling tools now. "
-                        "Reply with a short summary of what you actually completed, and what (if anything) is left to do."
-                    ),
-                })
-                self.out.assistant_label()
-                try:
-                    result = chat(
-                        config=self.config,
-                        messages=self.build_messages(),
-                        tools=[],
-                        on_token=self.out.token,
-                        cancel_event=cancel_event,
-                        on_response=on_response,
-                    )
-                except ProviderCancelled:
-                    self.out.newline()
-                    self.out.warn("[localcoder] Generation interrupted.")
-                    self.conversation.append({"role": "assistant", "content": "[interrupted by user]"})
-                    return
-                except (ProviderError, ProviderToolsUnsupported) as e:
-                    self.out.newline()
-                    self.out.err(self.format_error(e))
-                    return
-                self.out.newline()
-                self.conversation.append({"role": "assistant", "content": result["content"]})
-                return
-
             self.out.assistant_label()
 
             def attempt(tools):
@@ -490,6 +463,10 @@ class App:
                     self.out.info("[loop mode] Reached the end — looping back to verify the work.")
                     self.conversation.append({"role": "user", "content": LOOP_VERIFY_MESSAGE})
                     continue
+                unfinished = [t for t in self.todos if t["status"] != "completed"]
+                if unfinished:
+                    self.out.warn(f"[localcoder] Stopped with {len(unfinished)} checklist item(s) not completed:")
+                    self.out.todo_list(self.todos)
                 return
 
             self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
@@ -520,6 +497,8 @@ class App:
                     result_payload = execute_tool(name, args, self.tool_ctx(cancel_event))
 
                 self.out.tool_result(result_payload)
+                if name == "todo_write" and "error" not in result_payload:
+                    self.out.todo_list(self.todos)
 
                 self.conversation.append(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result_payload)}

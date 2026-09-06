@@ -244,6 +244,7 @@ def test_get_tools_no_index_no_ctags(tmp_path, monkeypatch):
         "spawn_subagent",
         "spawn_subagents",
         "spawn_coding_subagents",
+        "todo_write",
     ]
 
 
