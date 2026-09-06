@@ -199,10 +199,13 @@ def test_needs_confirmation():
     assert needs_confirmation("run_shell") is True
     assert needs_confirmation("run_shell_background") is True
     assert needs_confirmation("stop_background_task") is True
+    assert needs_confirmation("spawn_coding_subagents") is True
     assert needs_confirmation("read_file") is False
     assert needs_confirmation("search_code") is False
     assert needs_confirmation("list_background_tasks") is False
     assert needs_confirmation("get_background_output") is False
+    assert needs_confirmation("spawn_subagent") is False
+    assert needs_confirmation("spawn_subagents") is False
 
 
 def test_run_shell_background_dispatch(tmp_path):
@@ -238,6 +241,9 @@ def test_get_tools_no_index_no_ctags(tmp_path, monkeypatch):
         "list_background_tasks",
         "get_background_output",
         "stop_background_task",
+        "spawn_subagent",
+        "spawn_subagents",
+        "spawn_coding_subagents",
     ]
 
 

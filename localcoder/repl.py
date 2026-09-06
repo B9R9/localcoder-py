@@ -261,13 +261,18 @@ class App:
         messages.extend(self.conversation)
         return messages
 
-    def tool_ctx(self) -> dict:
+    def tool_ctx(self, cancel_event=None) -> dict:
         return {
             "cwd": self.cwd,
             "host": self.config.host,
+            "model": self.config.model,
+            "num_ctx": self.config.num_ctx,
+            "temperature": self.config.temperature,
             "embed_model": self.config.embed_model,
             "index_name": get_active_index_name(self.cwd),
             "background": self.background,
+            "cancel_event": cancel_event,
+            "max_subagents": self.config.max_subagents,
         }
 
     def toolbar_state(self) -> dict:
@@ -377,10 +382,10 @@ class App:
                 if needs_confirmation(name):
                     approved = confirm_fn("[localcoder] Approve this action?")
                     result_payload = (
-                        execute_tool(name, args, self.tool_ctx()) if approved else {"error": "User declined this action."}
+                        execute_tool(name, args, self.tool_ctx(cancel_event)) if approved else {"error": "User declined this action."}
                     )
                 else:
-                    result_payload = execute_tool(name, args, self.tool_ctx())
+                    result_payload = execute_tool(name, args, self.tool_ctx(cancel_event))
 
                 self.conversation.append(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result_payload)}
@@ -751,7 +756,17 @@ class App:
             self.config.embed_model = value
             self.out.ok(f'[set] embed_model = "{value}" (used by the next /index build).')
             return
-        self.out.info("[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name>")
+        if sub == "max_subagents" and value is not None:
+            try:
+                self.config.max_subagents = int(value)
+                self.out.ok(f"[set] max_subagents = {self.config.max_subagents} (cap for the next spawn_subagents call).")
+            except ValueError:
+                self.out.warn(f'[set] "{value}" is not a valid integer.')
+            return
+        self.out.info(
+            "[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name> | "
+            "/set max_subagents <value>"
+        )
 
     def handle_stats_command(self) -> None:
         s = self.stats

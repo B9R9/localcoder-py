@@ -11,6 +11,14 @@ def test_defaults(monkeypatch, tmp_path):
     assert cfg.num_ctx == 8192
     assert cfg.auto_approve is False
     assert cfg.context == []
+    assert cfg.max_subagents == 4
+
+
+def test_max_subagents_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home-empty")
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(["--max-subagents", "2"])
+    assert cfg.max_subagents == 2
 
 
 def test_flags_override_defaults(monkeypatch, tmp_path):

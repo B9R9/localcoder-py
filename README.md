@@ -23,6 +23,38 @@ Ce que ça fait :
   (si Universal Ctags est installé). Chaque tool optionnel n'apparaît dans
   la liste envoyée au modèle que si sa dépendance est réellement là —
   sinon zéro coût en tokens.
+- Deux tools de délégation à des sous-agents, même endpoint/modèle Ollama que
+  la conversation principale mais chacun avec sa propre fenêtre de contexte
+  jetable — le modèle principal ne récupère que leur réponse finale, jamais
+  leurs appels d'outils intermédiaires, pour ne pas saturer son propre
+  contexte sur une recherche large. Les deux sont en lecture seule (pas
+  d'écriture de fichier, pas de `run_shell`) puisqu'ils tournent sans
+  personne pour approuver une action pendant leur exécution :
+    - `spawn_subagent` (mode **loop**) — une tâche d'investigation à la
+      fois, séquentielle : repérer comment quelque chose fonctionne dans
+      une zone du code, par exemple.
+    - `spawn_subagents` (mode **graph**, lecture seule) — plusieurs tâches
+      indépendantes à la fois, en parallèle (4 branches max par défaut,
+      voir `/set max_subagents`), quand le travail se découpe naturellement
+      en parties qui ne dépendent pas les unes des autres (ex. investiguer
+      le module A et le module B séparément) ; chaque branche renvoie sa
+      propre réponse, et c'est au modèle principal de les recomposer en une
+      réponse finale.
+    - `spawn_coding_subagents` (mode **graph**, avec écriture) — même
+      découpage en parallèle, mais chaque sous-agent peut aussi écrire des
+      fichiers et lancer des commandes, sans confirmation à chaque action :
+      il travaille sur sa propre branche git isolée (`git worktree`),
+      créée à partir d'une branche de travail commune elle-même créée
+      depuis ta branche courante. Une fois toutes les tâches terminées,
+      chaque branche est committée et mergée dans la branche de travail
+      (un conflit est signalé, pas silencieusement perdu). Cette branche de
+      travail n'est **jamais** mergée automatiquement dans ta branche —
+      il faut le faire toi-même via `run_shell` (donc avec confirmation,
+      comme n'importe quelle écriture). Nécessite que le projet soit déjà
+      un dépôt git, et ne voit que les changements **commités** (commit ou
+      stash tes modifications en cours avant d'utiliser ce tool). Lancer
+      `spawn_coding_subagents` lui-même demande une confirmation, comme
+      `write_file`/`edit_file`/`run_shell`.
 - `search_code` utilise `ripgrep` s'il est installé, sinon `grep` en repli.
 - `edit_file` fait un remplacement ciblé (ancien texte → nouveau texte,
   doit matcher exactement une fois) plutôt que de réécrire tout le fichier.
@@ -159,6 +191,10 @@ alias localcoder="PYTHONPATH=/chemin/vers/localcoder-py python3 -m localcoder"
   session
 - `/set num_ctx <val>` — change la taille de la fenêtre de contexte pour
   le reste de la session
+- `/set max_subagents <val>` — change le nombre max de branches parallèles
+  pour `spawn_subagents` pour le reste de la session (défaut 4, voir
+  `--max-subagents` ; chaque branche est une conversation + requête Ollama
+  de plus en mémoire, à ajuster selon la RAM dispo)
 - `/stats` — résumé cumulé de la session (modèle, tours, tokens, temps
   total, % de la fenêtre de contexte utilisé au dernier tour)
 - `/verbose` — active/désactive le détail par tour façon
@@ -324,6 +360,7 @@ localcoder --role code-review
 localcoder --session auth-bug --role code-review   # reprend/démarre le fil "auth-bug"
 localcoder --verbose         # ou -v : détail par tour dès le départ
 localcoder --no-warm-up      # saute le préchargement du modèle au démarrage
+localcoder --max-subagents 2 # limite les branches parallèles de spawn_subagents (défaut 4)
 # Mode dév : relance à chaque changement de fichier surveillé
 localcoder --watch
 localcoder --watch-path roles --watch-path tests/base.py   # surveille aussi ces chemins
