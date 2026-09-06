@@ -33,12 +33,28 @@ Ce que ça fait :
     - `spawn_subagent` (mode **loop**) — une tâche d'investigation à la
       fois, séquentielle : repérer comment quelque chose fonctionne dans
       une zone du code, par exemple.
-    - `spawn_subagents` (mode **graph**) — plusieurs tâches indépendantes à
-      la fois, en parallèle (4 branches max), quand le travail se découpe
-      naturellement en parties qui ne dépendent pas les unes des autres
-      (ex. investiguer le module A et le module B séparément) ; chaque
-      branche renvoie sa propre réponse, et c'est au modèle principal de
-      les recomposer en une réponse finale.
+    - `spawn_subagents` (mode **graph**, lecture seule) — plusieurs tâches
+      indépendantes à la fois, en parallèle (4 branches max par défaut,
+      voir `/set max_subagents`), quand le travail se découpe naturellement
+      en parties qui ne dépendent pas les unes des autres (ex. investiguer
+      le module A et le module B séparément) ; chaque branche renvoie sa
+      propre réponse, et c'est au modèle principal de les recomposer en une
+      réponse finale.
+    - `spawn_coding_subagents` (mode **graph**, avec écriture) — même
+      découpage en parallèle, mais chaque sous-agent peut aussi écrire des
+      fichiers et lancer des commandes, sans confirmation à chaque action :
+      il travaille sur sa propre branche git isolée (`git worktree`),
+      créée à partir d'une branche de travail commune elle-même créée
+      depuis ta branche courante. Une fois toutes les tâches terminées,
+      chaque branche est committée et mergée dans la branche de travail
+      (un conflit est signalé, pas silencieusement perdu). Cette branche de
+      travail n'est **jamais** mergée automatiquement dans ta branche —
+      il faut le faire toi-même via `run_shell` (donc avec confirmation,
+      comme n'importe quelle écriture). Nécessite que le projet soit déjà
+      un dépôt git, et ne voit que les changements **commités** (commit ou
+      stash tes modifications en cours avant d'utiliser ce tool). Lancer
+      `spawn_coding_subagents` lui-même demande une confirmation, comme
+      `write_file`/`edit_file`/`run_shell`.
 - `search_code` utilise `ripgrep` s'il est installé, sinon `grep` en repli.
 - `edit_file` fait un remplacement ciblé (ancien texte → nouveau texte,
   doit matcher exactement une fois) plutôt que de réécrire tout le fichier.

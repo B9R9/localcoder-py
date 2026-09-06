@@ -47,6 +47,7 @@ TOP_COMMANDS = [
     {"cmd": "/set temperature", "desc": "Change sampling temperature for the rest of this session", "arg": "free"},
     {"cmd": "/set num_ctx", "desc": "Change the context-window size (tokens) for the rest of this session", "arg": "free"},
     {"cmd": "/set embed_model", "desc": "Change which embed model the next /index build uses", "arg": "model"},
+    {"cmd": "/set max_subagents", "desc": "Change how many parallel branches spawn_subagents/spawn_coding_subagents can use at once", "arg": "free"},
     {"cmd": "/bg run", "desc": "Run a shell command in the background — it keeps going while you keep working; check on it with /bg list and /bg output", "arg": "free"},
     {"cmd": "/bg list", "desc": "List background tasks (started here or by the model), with running/exit status", "arg": None},
     {"cmd": "/bg output", "desc": "Show the stdout/stderr captured so far for a background task", "arg": "free"},
