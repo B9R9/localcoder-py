@@ -238,6 +238,29 @@ BASE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_subagent",
+            "description": (
+                "Delegate a self-contained, read-only investigation task to a sub-agent with its own "
+                "fresh conversation (same Ollama model, no access to yours). Use it for broad exploration "
+                "(e.g. tracing how something works across many files) so its intermediate search/read tool "
+                "calls fill up its context instead of yours — you only get its final answer back. The "
+                "sub-agent cannot write files or run shell commands."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "A clear, self-contained description of what to investigate and what the answer should cover — the sub-agent has no memory of this conversation.",
+                    }
+                },
+                "required": ["task"],
+            },
+        },
+    },
 ]
 
 SEMANTIC_SEARCH_TOOL = {
@@ -441,5 +464,10 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
 
     if name == "stop_background_task":
         return ctx["background"].stop(args["id"])
+
+    if name == "spawn_subagent":
+        from localcoder.subagent import run_subagent  # lazy: subagent.py imports from this module
+
+        return run_subagent(args["task"], ctx, cancel_event=ctx.get("cancel_event"))
 
     return {"error": f"Unknown tool: {name}"}

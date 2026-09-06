@@ -261,13 +261,17 @@ class App:
         messages.extend(self.conversation)
         return messages
 
-    def tool_ctx(self) -> dict:
+    def tool_ctx(self, cancel_event=None) -> dict:
         return {
             "cwd": self.cwd,
             "host": self.config.host,
+            "model": self.config.model,
+            "num_ctx": self.config.num_ctx,
+            "temperature": self.config.temperature,
             "embed_model": self.config.embed_model,
             "index_name": get_active_index_name(self.cwd),
             "background": self.background,
+            "cancel_event": cancel_event,
         }
 
     def toolbar_state(self) -> dict:
@@ -377,10 +381,10 @@ class App:
                 if needs_confirmation(name):
                     approved = confirm_fn("[localcoder] Approve this action?")
                     result_payload = (
-                        execute_tool(name, args, self.tool_ctx()) if approved else {"error": "User declined this action."}
+                        execute_tool(name, args, self.tool_ctx(cancel_event)) if approved else {"error": "User declined this action."}
                     )
                 else:
-                    result_payload = execute_tool(name, args, self.tool_ctx())
+                    result_payload = execute_tool(name, args, self.tool_ctx(cancel_event))
 
                 self.conversation.append(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result_payload)}
