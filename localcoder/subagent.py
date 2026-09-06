@@ -25,11 +25,17 @@ from localcoder.tools import execute_tool, get_tools
 
 MAX_SUBAGENT_ROUNDS = 6
 
-# Caps how many branches spawn_subagents fans out to at once — a runaway
-# model call asking for dozens of branches would otherwise flood Ollama
-# with concurrent requests for no real benefit (a single local model
-# instance serializes them anyway).
-MAX_PARALLEL_SUBAGENTS = 4
+# Default cap on how many branches spawn_subagents fans out to at once —
+# overridable per-project/session via config's max_subagents (--max-subagents,
+# /set max_subagents). Each branch is a full nested conversation history held
+# in memory plus its own concurrent Ollama request, so more branches means
+# more RAM and more load on the (usually single, local) Ollama instance.
+DEFAULT_MAX_PARALLEL_SUBAGENTS = 4
+
+# However max_subagents is set, never fan out past this — a typo'd config
+# value (or a model echoing an unreasonable number back) shouldn't be able to
+# spin up an unbounded number of concurrent branches.
+HARD_MAX_PARALLEL_SUBAGENTS = 16
 
 SYSTEM_PROMPT = (
     "You are a sub-agent investigating one self-contained task on behalf of another agent. "
@@ -104,7 +110,9 @@ def run_subagents(tasks: list[str], ctx: dict, cancel_event=None) -> dict:
     """
     if not tasks:
         return {"error": "No tasks given."}
-    tasks = tasks[:MAX_PARALLEL_SUBAGENTS]
+    requested_cap = ctx.get("max_subagents", DEFAULT_MAX_PARALLEL_SUBAGENTS)
+    cap = max(1, min(requested_cap, HARD_MAX_PARALLEL_SUBAGENTS))
+    tasks = tasks[:cap]
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         futures = [pool.submit(run_subagent, task, ctx, cancel_event) for task in tasks]

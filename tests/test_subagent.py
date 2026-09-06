@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from localcoder.subagent import MAX_PARALLEL_SUBAGENTS, run_subagent, run_subagents
+from localcoder.subagent import DEFAULT_MAX_PARALLEL_SUBAGENTS, HARD_MAX_PARALLEL_SUBAGENTS, run_subagent, run_subagents
 from localcoder.tools import execute_tool, get_tools
 
 
@@ -89,7 +89,23 @@ def test_run_subagents_runs_independent_branches_in_parallel(tmp_path, mock_olla
 
 
 @pytest.mark.parametrize("mock_ollama", ["simple"], indirect=True)
-def test_run_subagents_caps_the_number_of_parallel_branches(tmp_path, mock_ollama):
-    tasks = [f"task {i}" for i in range(MAX_PARALLEL_SUBAGENTS + 5)]
+def test_run_subagents_caps_at_the_default_when_unconfigured(tmp_path, mock_ollama):
+    tasks = [f"task {i}" for i in range(DEFAULT_MAX_PARALLEL_SUBAGENTS + 5)]
     result = run_subagents(tasks, _ctx(tmp_path))
-    assert len(result["results"]) == MAX_PARALLEL_SUBAGENTS
+    assert len(result["results"]) == DEFAULT_MAX_PARALLEL_SUBAGENTS
+
+
+@pytest.mark.parametrize("mock_ollama", ["simple"], indirect=True)
+def test_run_subagents_respects_a_configured_max_subagents(tmp_path, mock_ollama):
+    ctx = {**_ctx(tmp_path), "max_subagents": 2}
+    tasks = [f"task {i}" for i in range(5)]
+    result = run_subagents(tasks, ctx)
+    assert len(result["results"]) == 2
+
+
+@pytest.mark.parametrize("mock_ollama", ["simple"], indirect=True)
+def test_run_subagents_never_exceeds_the_hard_ceiling(tmp_path, mock_ollama):
+    ctx = {**_ctx(tmp_path), "max_subagents": 1000}
+    tasks = [f"task {i}" for i in range(HARD_MAX_PARALLEL_SUBAGENTS + 5)]
+    result = run_subagents(tasks, ctx)
+    assert len(result["results"]) == HARD_MAX_PARALLEL_SUBAGENTS

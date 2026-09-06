@@ -27,6 +27,7 @@ DEFAULTS = {
     "embed_model": "nomic-embed-text",  # used only by /index build + semantic_search
     "verbose": False,  # print an `ollama --verbose`-style breakdown after every turn
     "warm_up": True,  # preload the model at startup so the first real message isn't slow
+    "max_subagents": 4,  # cap on parallel branches spawn_subagents fans out to
 }
 
 
@@ -43,6 +44,7 @@ class Config:
     embed_model: str = DEFAULTS["embed_model"]
     verbose: bool = DEFAULTS["verbose"]
     warm_up: bool = DEFAULTS["warm_up"]
+    max_subagents: int = DEFAULTS["max_subagents"]
 
 
 def _load_json_if_exists(path: Path) -> dict:
@@ -90,6 +92,9 @@ def _parse_flags(argv: list[str]) -> tuple[dict, list[str]]:
             flags["verbose"] = True
         elif arg == "--no-warm-up":
             flags["warm_up"] = False
+        elif arg == "--max-subagents":
+            i += 1
+            flags["max_subagents"] = int(argv[i])
         i += 1
     return flags, context_flags
 

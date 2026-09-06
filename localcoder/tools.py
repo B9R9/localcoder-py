@@ -269,7 +269,9 @@ BASE_TOOLS = [
                 "Like spawn_subagent, but splits several INDEPENDENT investigation tasks across parallel "
                 "sub-agents at once instead of one at a time — use this when a task naturally breaks into "
                 "parts that don't depend on each other's findings (e.g. investigate module A and module B "
-                "separately), since running them concurrently is faster than one after another. You get back "
+                "separately), since running them concurrently is faster than one after another. The number "
+                "of branches actually run is capped (configurable, /set max_subagents) — if you pass more "
+                "tasks than the cap, only the first ones run. You get back "
                 "every branch's own answer (or error) to synthesize into one final answer yourself. Each "
                 "sub-agent is read-only and has no access to the others' findings while running."
             ),

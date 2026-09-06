@@ -272,6 +272,7 @@ class App:
             "index_name": get_active_index_name(self.cwd),
             "background": self.background,
             "cancel_event": cancel_event,
+            "max_subagents": self.config.max_subagents,
         }
 
     def toolbar_state(self) -> dict:
@@ -755,7 +756,17 @@ class App:
             self.config.embed_model = value
             self.out.ok(f'[set] embed_model = "{value}" (used by the next /index build).')
             return
-        self.out.info("[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name>")
+        if sub == "max_subagents" and value is not None:
+            try:
+                self.config.max_subagents = int(value)
+                self.out.ok(f"[set] max_subagents = {self.config.max_subagents} (cap for the next spawn_subagents call).")
+            except ValueError:
+                self.out.warn(f'[set] "{value}" is not a valid integer.')
+            return
+        self.out.info(
+            "[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name> | "
+            "/set max_subagents <value>"
+        )
 
     def handle_stats_command(self) -> None:
         s = self.stats
