@@ -17,27 +17,37 @@ What it does:
 - Talks directly to Ollama's native API (`/api/chat`), not the
   OpenAI-compatible layer — so `num_ctx` can be set explicitly on every
   request. `urllib` (stdlib), no third-party HTTP client.
-- Exposes 6 core tools — `read_file`, `list_dir`, `search_code`,
-  `edit_file`, `write_file`, `run_shell` — plus `semantic_search` (if an
-  index exists, `/index build`) and `find_definition`/`find_references`
-  (if Universal Ctags is installed). Each optional tool only appears in
-  the list sent to the model if its dependency is actually present —
-  otherwise zero token cost.
-- Two tools for delegating to sub-agents, using the same Ollama
+- Exposes 10 core tools — `read_file`, `list_dir`, `search_code`,
+  `edit_file`, `write_file`, `run_shell` (blocks, 120s timeout),
+  `run_shell_background` (returns immediately with a task id) plus
+  `list_background_tasks`/`get_background_output`/`stop_background_task`
+  to check on and stop it (see "Background tasks" below) — plus
+  `semantic_search` (if an index exists, `/index build`) and
+  `find_definition`/`find_references` (if Universal Ctags is installed).
+  Each optional tool only appears in the list sent to the model if its
+  dependency is actually present — otherwise zero token cost. `read_file`,
+  `list_dir`, `search_code`, `edit_file` and `write_file` all refuse a path
+  that resolves outside the project root (e.g. via `../../` or an absolute
+  path) — the model can't read or write anything outside the project it
+  was pointed at.
+- Three tools for delegating to sub-agents, using the same Ollama
   endpoint/model as the main conversation but each with its own disposable
   context window — the main model only gets their final answer back, never
   their intermediate tool calls, so a broad search doesn't flood its own
-  context. Both are read-only (no file writes, no `run_shell`) since they
-  run with nobody around to approve an action while they execute:
+  context. The first two are read-only (no file writes, no `run_shell`)
+  since they run with nobody around to approve an action while they
+  execute; the third can write, but only inside its own disposable git
+  branch (see below):
     - `spawn_subagent` (**loop** mode) — one investigation task at a time,
       sequential: e.g. figure out how something works in a given area of
       the code.
-    - `spawn_subagents` (**graph** mode, read-only) — several independent
-      tasks at once, in parallel (4 branches max by default, see
-      `/set max_subagents`), when the work naturally splits into parts that
-      don't depend on each other (e.g. investigate module A and module B
-      separately); each branch returns its own answer, and it's up to the
-      main model to combine them into a final response.
+    - `spawn_subagents` (**graph** mode, read-only) — two or more
+      independent tasks at once, in parallel (4 branches max by default,
+      see `/set max_subagents`; hard-capped at 16 regardless of config),
+      when the work naturally splits into parts that don't depend on each
+      other (e.g. investigate module A and module B separately); each
+      branch returns its own answer, and it's up to the main model to
+      combine them into a final response.
     - `spawn_coding_subagents` (**graph** mode, with writes) — the same
       parallel split, but each sub-agent can also write files and run
       commands, without confirmation on every action: it works on its own
@@ -51,12 +61,23 @@ What it does:
       sees **committed** changes (commit or stash your work in progress
       before using this tool). Launching `spawn_coding_subagents` itself
       requires confirmation, like `write_file`/`edit_file`/`run_shell`.
-- `search_code` uses `ripgrep` if installed, falling back to `grep`
-  otherwise.
+- `search_code` uses `ripgrep` if installed; otherwise it falls back to a
+  built-in pure-Python search rather than shelling out to the system
+  `grep` — macOS's bundled `grep` doesn't accept the same flags GNU grep
+  does, so this keeps behavior identical everywhere instead of silently
+  breaking on some platforms.
 - `edit_file` does a targeted replacement (old text → new text, must match
   exactly once) rather than rewriting the whole file.
-- Asks for confirmation before any action that changes something (file
-  write, shell command) — except in `--yolo` mode.
+- Background shell tasks (`/bg run`, `/bg list`, `/bg output`, `/bg stop`):
+  a long-running command (a dev server, a test watcher) keeps running
+  without blocking the conversation, and its captured stdout/stderr can be
+  checked on later. The model has the same ability via
+  `run_shell_background` — useful so it doesn't block a whole turn waiting
+  on a command that isn't supposed to finish.
+- Asks for confirmation before any action that changes something
+  (`write_file`, `edit_file`, `run_shell`, `run_shell_background`,
+  `stop_background_task`, launching `spawn_coding_subagents`) — except in
+  `--yolo` mode.
 - Explicit context: `--context`, config, or `/context add` in-session —
   file, folder, or glob — never an automatic project scan.
 - Explicit role: only one active at a time (`--role`, `/role use`).
@@ -153,7 +174,10 @@ alias localcoder="PYTHONPATH=/path/to/localcoder-py python3 -m localcoder"
   session; without arguments, saves under the already-active name
 - `/session load <name>` — loads a saved session (history + role +
   associated context), replaces the current state
-- `/session new <name>` — starts a blank session under this name
+- `/session new <name>` — opens a fresh, named thread in a **new terminal
+  window** alongside this one (macOS only, via Terminal.app; on other
+  platforms, or if no terminal could be opened, it falls back to starting
+  the blank session in this same window)
 - `/session list` — lists saved sessions for this project
 - `/role use <name>` — loads `roles/<name>.md` (or
   `~/.localcoder/roles/<name>.md`) and replaces the active role
@@ -184,10 +208,20 @@ alias localcoder="PYTHONPATH=/path/to/localcoder-py python3 -m localcoder"
   session
 - `/set num_ctx <val>` — changes the context window size for the rest of
   the session
-- `/set max_subagents <val>` — changes the max number of parallel
-  branches for `spawn_subagents` for the rest of the session (default 4,
-  see `--max-subagents`; each branch is one more conversation + Ollama
-  request in memory, tune it to your available RAM)
+- `/set embed_model <name>` — changes which embedding model the next
+  `/index build` uses, for the rest of the session
+- `/set max_subagents <val>` — changes the max number of parallel branches
+  for `spawn_subagents`/`spawn_coding_subagents` for the rest of the
+  session (default 4, see `--max-subagents`, hard-capped at 16; each
+  branch is one more conversation + Ollama request in memory, tune it to
+  your available RAM)
+- `/bg run <command>` — starts a shell command in the background; keeps
+  running while you keep chatting
+- `/bg list` — lists background tasks (started here or by the model),
+  with running/exit status
+- `/bg output <id>` — shows the stdout/stderr captured so far for a
+  background task
+- `/bg stop <id>` — terminates a running background task
 - `/stats` — cumulative session summary (model, turns, tokens, total time,
   % of the context window used on the last turn)
 - `/verbose` — toggles per-turn detail à la `ollama run --verbose`
@@ -226,7 +260,7 @@ Vibe-style, rather than printing text that scrolls in the normal terminal:
 │  scrollable history (banner, responses, tools...)         │
 │  ...                                                       │
 ├──────────────────────────────────────────────────────────┤
-│  🐼 devstral-small-2 · role: tdd · context: 2 · ~1.2k/8k   │  ← status bar
+│  🐼 devstral-small-2 · role: tdd · context: 2 · ~1.2k/8k tok│  ← status bar
 ├──────────────────────────────────────────────────────────┤
 │  you> _                                                     │  ← always at the bottom
 └──────────────────────────────────────────────────────────┘
@@ -235,6 +269,10 @@ Vibe-style, rather than printing text that scrolls in the normal terminal:
 - The screen is cleared on launch — the banner (mascot, model, role,
   skills, context, commands) appears at the top of the history, not mixed
   into old terminal content.
+- The status bar only shows what's actually active: `role:` and `skills:`
+  appear only when one is loaded, `session:` only when the thread is
+  named, plus `socratic`/`debug`/`tools: off` whenever those are toggled
+  on (or the current model doesn't support tool calls).
 - The input line stays **always visible at the bottom of the screen**,
   even while the history scrolls above it — no more hunting for it after a
   long response. It now spans multiple lines (3 to 8 depending on what's
@@ -287,7 +325,7 @@ name) and a row of shortcuts below:
   `▲ N more above` / `▼ N more below` line shows what's hidden on each
   side — nothing is ever out of reach
 - **PgUp / PgDn** — when the menu is open, scrolls the selection a full
-  page at a time (handy for browsing the thirty-odd commands); outside the
+  page at a time (handy for browsing the forty-odd commands); outside the
   menu, they scroll the history as before
 - **Tab** — completes the line with the selected item **in full** (never
   submits) — handy for drilling into `/role use `, `/context add ` etc.
@@ -296,10 +334,12 @@ name) and a row of shortcuts below:
   away if it needs nothing else); otherwise sends the line as-is
 - **Esc** — clears the line (closes the menu)
 
-Five commands have a submenu that lists real values instead of static
+Eight commands have a submenu that lists real values instead of static
 text: `/role use` (roles on disk), `/skill use` (skills on disk),
-`/session load` (already-saved sessions), `/model use` (models already
-pulled in Ollama), and `/context add` — see right below.
+`/session load` (already-saved sessions), `/model use` and `/set
+embed_model` (models already pulled in Ollama), `/index use` (indexes
+already built), `/context load` (saved context sets), and `/context add`
+(a live directory browser — see right below).
 
 On non-interactive input (script, pipe, tests), localcoder detects the
 absence of a real TTY and automatically falls back to the classic
@@ -326,7 +366,8 @@ you> /context add
 
 Tab or Enter on a folder (it ends with `/`) descends into it without
 submitting; on a file, it adds it to the context. `node_modules`, `.git`,
-and hidden files are excluded.
+`dist`, `build`, `.next`, `.nuxt`, `coverage`, and hidden files are
+excluded.
 
 The context isn't locked to the current project — that's intentional, so
 you can pull in a file from a neighboring project (a frontend and a
@@ -349,7 +390,8 @@ localcoder --role code-review
 localcoder --session auth-bug --role code-review   # resumes/starts the "auth-bug" thread
 localcoder --verbose         # or -v: per-turn detail from the start
 localcoder --no-warm-up      # skips model preload on startup
-localcoder --max-subagents 2 # caps spawn_subagents' parallel branches (default 4)
+localcoder --max-subagents 2 # caps spawn_subagents/spawn_coding_subagents' parallel branches (default 4)
+localcoder --embed-model nomic-embed-text   # embedding model used by /index build + semantic_search
 # Dev mode: restarts on every watched file change
 localcoder --watch
 localcoder --watch-path roles --watch-path tests/base.py   # also watch these paths
@@ -383,8 +425,8 @@ The simplest way to use it: `./dev.sh` (see "Usage") — it creates
 glob:
 - **File** → read in full (truncated at 6000 characters) and injected as a
   system message, before even your first message.
-- **Folder** → turned into a tree (3 levels, `node_modules`/`.git` etc.
-  excluded).
+- **Folder** → turned into a tree (3 levels, `node_modules`/`.git`/`dist`/
+  `build`/`.next`/`.nuxt`/`coverage` excluded).
 - **Glob** (`docs/adr/*.md`) — a single `*` in the last path segment,
   loads the full content of every matching file.
 
@@ -447,11 +489,38 @@ localcoder --session auth-bug   # resumes exactly where you left off
 
 Naming a session (`--session`, `/session new`, or `/session save`)
 triggers automatic saving after every message — without a session name,
-nothing is written to disk.
+nothing is written to disk. `/session new <name>` opens the new thread in
+its own terminal window rather than replacing the current one (macOS
+only for now; elsewhere it starts the blank session right here instead).
 
 ```bash
 echo ".localcoder/" >> .gitignore
 ```
+
+### Background tasks
+
+```
+you> /bg run npm run dev
+[bg] Started bg1: npm run dev
+you> /bg list
+  bg1  [running]  npm run dev
+you> /bg output bg1
+you> /bg stop bg1
+```
+
+`/bg run <command>` starts a shell command (a dev server, a test watcher,
+a long build) without blocking the conversation — it keeps running in the
+background while you keep chatting. `/bg list` shows every task's
+running/exit status, `/bg output <id>` shows what it's printed to
+stdout/stderr so far (only the most recent ~4000 characters of each are
+kept), and `/bg stop <id>` terminates it.
+
+The model has the exact same ability via `run_shell_background` (plus
+`list_background_tasks`, `get_background_output`, `stop_background_task`)
+— handy so it isn't stuck waiting a full turn on a command that isn't
+meant to finish on its own. Tasks aren't persisted: they live only for the
+current process and are gone after `/exit` or `/restart` — `/session
+save`/`/session load` don't touch them either.
 
 ### Semantic search
 
@@ -461,10 +530,11 @@ localcoder
 you> /index build
 ```
 
-`/index build` walks the project, splits each file into chunks of about
-40 lines, and computes an embedding per chunk via Ollama. Files unchanged
-since the last build aren't re-embedded (compared by SHA1 hash). The index
-lives in `.localcoder/index.json`.
+`/index build` walks the project, splits each file into ~40-line chunks
+(8 lines of overlap between consecutive chunks) and computes an embedding
+per chunk via Ollama. Files unchanged since the last build aren't
+re-embedded (compared by SHA1 hash). The index lives in
+`.localcoder/index.json`.
 
 Once the index is built, the `semantic_search` tool automatically appears
 in the list sent to the model.
@@ -605,15 +675,18 @@ pytest
 ```
 
 Full suite: pure logic (config, context, roles, skills, sessions, menu,
-file browsing for `/context add`, semantic index) + tools + symbol search
-against a real Universal Ctags binary + Ollama client (streamed chat,
-cancellation via `cancel_event`, warm-up, model listing) + the full-screen
-interface's mechanics outside of rendering (menu computation, caching, the
-input line's state machine, `BufferSink` → transcript, `submit_line`
-routing) + end-to-end against a fake Ollama server (NDJSON streaming, tool
-calls, confirmation flow, sessions persisted across two runs, warm-up on
-startup, `/model`, `/set`, `/stats`, `/verbose`, `/summary`, `/search`,
-`/find`, `@path` mentions, role/skill creation from the interface).
+file browsing for `/context add`, semantic index) + tools + background
+tasks (`run_shell_background` and `/bg`) + symbol search against a real
+Universal Ctags binary + Ollama client (streamed chat, cancellation via
+`cancel_event`, warm-up, model listing) + sub-agents (`spawn_subagent(s)`
+and, against a real git repo with real `git worktree` checkouts,
+`spawn_coding_subagents`) + the full-screen interface's mechanics outside
+of rendering (menu computation, caching, the input line's state machine,
+`BufferSink` → transcript, `submit_line` routing) + end-to-end against a
+fake Ollama server (NDJSON streaming, tool calls, confirmation flow,
+sessions persisted across two runs, warm-up on startup, `/model`, `/set`,
+`/stats`, `/verbose`, `/summary`, `/search`, `/find`, `@path` mentions,
+role/skill creation from the interface).
 
 The full-screen interface's on-screen rendering (layout, spinner
 animation, Page Up/Page Down, centered menu layout) isn't covered by the
