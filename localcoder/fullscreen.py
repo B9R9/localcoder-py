@@ -33,6 +33,7 @@ import asyncio
 import html
 import shutil
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from prompt_toolkit.application import Application, get_app
@@ -53,13 +54,16 @@ from prompt_toolkit.widgets import Frame
 from localcoder import ui
 from localcoder.browse import browse_entries
 from localcoder.context import list_context_sets
+from localcoder.graph_store import list_graph_maps
 from localcoder.index_store import get_active_index_name, index_stats, list_indexes
 from localcoder.menu import compute_menu_items
-from localcoder.ollama_client import OllamaError, force_close, list_models, warm_up
+from localcoder.ollama_client import force_close
+from localcoder.providers import ProviderError, list_models, warm_up
 from localcoder.repl import App, OutputSink, _dispatch_command, _relaunch
 from localcoder.roles import list_roles
 from localcoder.sessions import list_sessions
 from localcoder.skills import list_skills
+from localcoder.subagents import run_graph_turn
 
 _MENU_MAX_ROWS = 20
 _SPINNER_INTERVAL = 0.12
@@ -181,6 +185,9 @@ class BufferSink(OutputSink):
 
     def tool_call(self, name: str, args: dict) -> None:
         self.screen.append_raw(f"\n{ui.tool_call_fragment(name, args)}")
+
+    def tool_result(self, result: dict) -> None:
+        self.screen.append_raw(ui.tool_result_fragment(result))
 
     def verbose_stats(self, meta: dict) -> None:
         for fragment in ui.verbose_stats_fragments(meta):
@@ -455,9 +462,9 @@ class ScreenApp:
             self.warming_up = True
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(self.executor, warm_up, self.app.config.host, self.app.config.model)
+                await loop.run_in_executor(self.executor, warm_up, self.app.config)
                 self.append_raw(ui.ok_fragment(f"[localcoder] {ui.MASCOT_NAME} is warmed up and ready."))
-            except OllamaError as err:
+            except ProviderError as err:
                 self.append_raw(ui.warn_fragment(f"[localcoder] Warm-up skipped: {self.app.format_error(err)}"))
             finally:
                 self.warming_up = False
@@ -469,11 +476,13 @@ class ScreenApp:
         return {
             "roles": lambda: list_roles(a.cwd),
             "sessions": lambda: list_sessions(a.cwd),
-            "models": lambda: list_models(a.config.host),
+            "models": lambda: list_models(a.config),
+            "providers": lambda: ["ollama", "nvidia"],
             "skills": lambda: list_skills(a.cwd),
             "files": lambda partial: browse_entries(a.cwd, partial),
             "context_set": lambda: list_context_sets(a.cwd),
             "index": lambda: [i["name"] for i in list_indexes(a.cwd)],
+            "graph_map": lambda: [g["name"] for g in list_graph_maps(a.cwd)],
         }
 
     def current_menu_items(self) -> list:
@@ -636,7 +645,15 @@ class ScreenApp:
             return pending["answer"]
 
         def work(cancel_event, on_response):
-            self.app.run_turn(confirm_fn, cancel_event=cancel_event, on_response=on_response)
+            start = time.perf_counter()
+            try:
+                if self.app.graph_mode:
+                    run_graph_turn(self.app, confirm_fn, cancel_event=cancel_event, on_response=on_response)
+                else:
+                    self.app.run_turn(confirm_fn, cancel_event=cancel_event, on_response=on_response)
+            finally:
+                self.app.out.newline()
+                self.app.out.info(f"[localcoder] {time.perf_counter() - start:.1f}s")
 
         await self._run_busy(work)
 
@@ -781,6 +798,21 @@ class ScreenApp:
             layout.focus(screen.transcript_window)
             scroll_page_down(event)
             layout.focus(screen.input_window)
+
+        @kb.add("c-p")
+        def _ctrl_p(event):
+            screen.app.toggle_plan_mode()
+            get_app().invalidate()
+
+        @kb.add("c-l")
+        def _ctrl_l(event):
+            screen.app.toggle_loop_mode()
+            get_app().invalidate()
+
+        @kb.add("c-g")
+        def _ctrl_g(event):
+            screen.app.toggle_graph_mode()
+            get_app().invalidate()
 
         @kb.add("c-c")
         def _ctrl_c(event):

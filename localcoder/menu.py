@@ -24,6 +24,12 @@ TOP_COMMANDS = [
     {"cmd": "/index use", "desc": "Switch which built index is active, if you've built more than one", "arg": "index"},
     {"cmd": "/index list", "desc": "List every index built for this project, and which one is active", "arg": None},
     {"cmd": "/index status", "desc": "Show how many files/chunks are indexed and when it was last built", "arg": None},
+    {"cmd": "/index delete", "desc": "Delete a named index's file — falls back to \"default\" if it was the active one", "arg": "index"},
+    {"cmd": "/graph_map build", "desc": "Scan the project's import statements into a file-to-file graph so graph_neighbors can navigate without reading every file (optionally: a name)", "arg": "free"},
+    {"cmd": "/graph_map use", "desc": "Switch which built graph map is active, if you've built more than one", "arg": "graph_map"},
+    {"cmd": "/graph_map list", "desc": "List every graph map built for this project, and which one is active", "arg": None},
+    {"cmd": "/graph_map status", "desc": "Show how many files/import edges are in the active graph map and when it was built", "arg": None},
+    {"cmd": "/graph_map delete", "desc": "Delete a named graph map's file — falls back to \"default\" if it was the active one", "arg": "graph_map"},
     {"cmd": "/session save", "desc": "Name (if needed) and save the current thread so it can be resumed later", "arg": "free"},
     {"cmd": "/session load", "desc": "Resume a saved thread — its history, role, context and skills", "arg": "session"},
     {"cmd": "/session new", "desc": "Open a fresh named thread in a new terminal window, alongside this one", "arg": "free"},
@@ -48,6 +54,7 @@ TOP_COMMANDS = [
     {"cmd": "/set num_ctx", "desc": "Change the context-window size (tokens) for the rest of this session", "arg": "free"},
     {"cmd": "/set embed_model", "desc": "Change which embed model the next /index build uses", "arg": "model"},
     {"cmd": "/set max_subagents", "desc": "Change how many parallel branches spawn_subagents/spawn_coding_subagents can use at once", "arg": "free"},
+    {"cmd": "/set provider", "desc": "Switch between Ollama (local) and the NVIDIA API for the rest of this session", "arg": "providers"},
     {"cmd": "/bg run", "desc": "Run a shell command in the background — it keeps going while you keep working; check on it with /bg list and /bg output", "arg": "free"},
     {"cmd": "/bg list", "desc": "List background tasks (started here or by the model), with running/exit status", "arg": None},
     {"cmd": "/bg output", "desc": "Show the stdout/stderr captured so far for a background task", "arg": "free"},
@@ -56,6 +63,9 @@ TOP_COMMANDS = [
     {"cmd": "/verbose", "desc": "Toggle a per-turn timing breakdown, like `ollama run --verbose`", "arg": None},
     {"cmd": "/debug", "desc": "Toggle full tracebacks on errors instead of a short message", "arg": None},
     {"cmd": "/socratic", "desc": "Toggle Socratic mode — guided questions instead of direct answers, to keep learning", "arg": None},
+    {"cmd": "/plan", "desc": "Toggle plan mode — blocks write actions (edit/write/run) so the model can only read/search (Ctrl+P in full-screen)", "arg": None},
+    {"cmd": "/loop", "desc": "Toggle loop mode — after finishing, loop back and verify the work once before replying (Ctrl+L)", "arg": None},
+    {"cmd": "/graph", "desc": "Toggle graph mode — splits the request across parallel sub-agents, then combines their results (Ctrl+G)", "arg": None},
     {"cmd": "/summary", "desc": "Ask the model to recap the conversation — prints it, or saves it to a file", "arg": None},
     {"cmd": "/search", "desc": "Search the whole project for exact text/regex — works with no context added, no model round-trip", "arg": "free"},
     {"cmd": "/find", "desc": "Find an exact symbol's definition/references across the whole project — no context needed", "arg": "free"},
@@ -74,8 +84,12 @@ _DYNAMIC = [
     ("/context add ", "files"),
     ("/context load ", "context_set"),
     ("/index use ", "index"),
+    ("/index delete ", "index"),
+    ("/graph_map use ", "graph_map"),
+    ("/graph_map delete ", "graph_map"),
     ("/model use ", "models"),
     ("/set embed_model ", "models"),
+    ("/set provider ", "providers"),
     ("/skill use ", "skills"),
 ]
 
@@ -94,7 +108,7 @@ class MenuItem:
 
 # lists: {"roles": () -> list[str], "sessions": () -> list[str],
 #         "models": () -> list[str], "skills": () -> list[str],
-#         "files": (partial: str) -> list[str]}
+#         "providers": () -> list[str], "files": (partial: str) -> list[str]}
 # Each getter is only called when actually needed.
 def compute_menu_items(buffer: str, lists: Optional[dict[str, Callable]] = None) -> list[MenuItem]:
     lists = lists or {}

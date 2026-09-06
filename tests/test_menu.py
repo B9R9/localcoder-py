@@ -5,6 +5,7 @@ LISTS = {
     "sessions": lambda: ["auth-bug", "checkout-flow"],
     "models": lambda: ["devstral-small-2", "qwen3-coder:30b"],
     "skills": lambda: ["write-tests", "commit-messages"],
+    "providers": lambda: ["ollama", "nvidia"],
     # "files" is partial-aware (a directory browser, see browse.py) — it
     # takes the typed-so-far text and returns already-filtered entries,
     # unlike the other lists above which are static and filtered generically.
@@ -132,7 +133,14 @@ def test_set_subcommands_need_free_text():
         "/set num_ctx ": False,
         "/set embed_model ": False,
         "/set max_subagents ": False,
+        "/set provider ": False,
     }
+
+
+def test_set_provider_lists_ollama_and_nvidia():
+    items = compute_menu_items("/set provider ", LISTS)
+    assert [i.value for i in items] == ["/set provider ollama", "/set provider nvidia"]
+    assert all(i.submit for i in items)
 
 
 def test_stats_and_verbose_are_leaf_commands():
@@ -149,6 +157,23 @@ def test_debug_and_socratic_are_leaf_commands():
         assert len(items) == 1
         assert items[0].value == cmd
         assert items[0].submit is True
+
+
+def test_loop_is_a_leaf_command():
+    items = compute_menu_items("/loop", LISTS)
+    assert len(items) == 1
+    assert items[0].value == "/loop"
+    assert items[0].submit is True
+
+
+def test_graph_toggle_is_a_leaf_among_graph_map_siblings():
+    # "/graph" (the toggle) is now a prefix of "/graph_map ..." too, so
+    # typing it surfaces both — it's still a leaf itself (submits immediately,
+    # no further typing needed).
+    items = compute_menu_items("/graph", LISTS)
+    graph_item = next(i for i in items if i.value == "/graph")
+    assert graph_item.submit is True
+    assert any(i.value.startswith("/graph_map") for i in items)
 
 
 def test_summary_search_find_present():

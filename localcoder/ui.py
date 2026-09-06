@@ -184,6 +184,22 @@ def tool_call_fragment(name: str, args: dict) -> str:
     return f"<tool>[tool] <tool.name>{_esc(name)}</tool.name>({_esc(rendered)})</tool>"
 
 
+# Kept short — this is a live progress indicator, not the full tool output
+# the model itself sees (that one goes into the conversation untruncated by
+# this cap; tools.py's own MAX_OUTPUT_CHARS already keeps it reasonable).
+_TOOL_RESULT_PREVIEW_CHARS = 300
+
+
+def tool_result_fragment(result: dict) -> str:
+    try:
+        rendered = json.dumps(result)
+    except (TypeError, ValueError):
+        rendered = str(result)
+    if len(rendered) > _TOOL_RESULT_PREVIEW_CHARS:
+        rendered = rendered[:_TOOL_RESULT_PREVIEW_CHARS] + "…"
+    return f"<dim>  → {_esc(rendered)}</dim>"
+
+
 def info_fragment(text: str) -> str:
     return f"<dim>{_esc(text)}</dim>"
 
@@ -259,11 +275,13 @@ def banner_fragments(config, cwd, session_name, role, context_entries, idx_stats
     lines += [f"<box>{_esc(line)}</box>" for line in box.split("\n")]
     lines.append("")
 
+    endpoint = config.base_url if config.provider == "nvidia" else config.host
     lines.append(
-        f"<label>model</label> <value>{_esc(config.model)}</value>"
+        f"<label>provider</label> <value>{_esc(config.provider)}</value>"
+        f"   <label>model</label> <value>{_esc(config.model)}</value>"
         f"   <label>num_ctx</label> <value>{config.num_ctx}</value>"
         f"   <label>temperature</label> <value>{config.temperature}</value>"
-        f"   <label>host</label> <value>{_esc(config.host)}</value>"
+        f"   <label>host</label> <value>{_esc(endpoint)}</value>"
     )
     lines.append(f"<label>project</label> <value>{_esc(cwd)}</value>")
 
@@ -288,15 +306,17 @@ def banner_fragments(config, cwd, session_name, role, context_entries, idx_stats
         )
 
     lines.append(
-        "<dim>Commands: /index build|use|list|status  /session save|load|new|list  /role use|list|create|clear  "
+        "<dim>Commands: /index build|use|list|status|delete  /graph_map build|use|list|status|delete  /session save|load|new|list  /role use|list|create|clear  "
         "/skill use|list|create|clear  /context add|list|clear|save|load|sets  /model use|list  /set temperature|num_ctx  "
-        "/stats  /verbose  /debug  /socratic  /summary  /search  /find  /reset  /restart  /help  /exit</dim>"
+        "/stats  /verbose  /debug  /socratic  /plan  /loop  /graph  /summary  /search  /find  /reset  /restart  /help  /exit</dim>"
     )
     if interactive:
         lines.append(
             '<dim>Type "/" for a centered menu — ↑/↓ to move, Enter/Tab to pick, Esc to clear. '
             "@path in a message loads that file/dir into context. Ctrl+C cancels a reply in progress; "
-            "at an empty prompt, Ctrl+C or Ctrl+D quits. PageUp/PageDown scroll this pane (native "
+            "at an empty prompt, Ctrl+C or Ctrl+D quits. Ctrl+P toggles plan mode (blocks writes), "
+            "Ctrl+L toggles loop mode, Ctrl+G toggles graph mode. "
+            "PageUp/PageDown scroll this pane (native "
             "copy/paste works normally, so the mouse is left alone).</dim>"
         )
     lines.append("")
@@ -330,6 +350,12 @@ def bottom_toolbar(state: dict):
         parts.append("socratic")
     if state.get("debug"):
         parts.append("debug")
+    if state.get("plan_mode"):
+        parts.append("plan mode")
+    if state.get("loop_mode"):
+        parts.append("loop mode")
+    if state.get("graph_mode"):
+        parts.append("graph mode")
     if state.get("tools_disabled"):
         parts.append("tools: off")
     num_ctx = state.get("num_ctx")
@@ -352,6 +378,10 @@ def user_separator() -> None:
 
 def tool_call(name: str, args: dict) -> None:
     _print(f"\n{tool_call_fragment(name, args)}")
+
+
+def tool_result(result: dict) -> None:
+    _print(tool_result_fragment(result))
 
 
 def info(text: str) -> None:

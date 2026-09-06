@@ -6,6 +6,7 @@ once without going through a subprocess.
 
 from __future__ import annotations
 
+import json
 import types
 
 from localcoder.repl import SOCRATIC_PROMPT, SYSTEM_PROMPT, App
@@ -42,6 +43,166 @@ def test_toggle_socratic_flips_state_and_reports_it(tmp_path, monkeypatch):
     app.toggle_socratic()
     assert app.socratic is False
     assert "off" in messages[-1]
+
+
+def test_toggle_plan_mode_flips_state_and_reports_it(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    messages = []
+    app.out.ok = messages.append
+
+    assert app.plan_mode is False
+    app.toggle_plan_mode()
+    assert app.plan_mode is True
+    assert "on" in messages[-1]
+    app.toggle_plan_mode()
+    assert app.plan_mode is False
+    assert "off" in messages[-1]
+
+
+def test_plan_mode_blocks_write_tools_without_asking_for_confirmation(tmp_path, monkeypatch):
+    """While plan mode is active, a write tool call must be refused outright
+    — the model gets a normal tool error back — and the user is never
+    prompted, unlike the ordinary confirm/decline path."""
+    from localcoder import repl as repl_module
+
+    app = _make_app(tmp_path, monkeypatch)
+    app.plan_mode = True
+    app.conversation.append({"role": "user", "content": "create a new file"})
+
+    calls = iter(
+        [
+            {
+                "content": "",
+                "tool_calls": [
+                    {"id": "1", "function": {"name": "write_file", "arguments": {"path": "x.txt", "content": "hi"}}}
+                ],
+                "done_meta": None,
+            },
+            {"content": "Can't do that — plan mode is on.", "tool_calls": None, "done_meta": None},
+        ]
+    )
+    monkeypatch.setattr(repl_module, "chat", lambda **kwargs: next(calls))
+
+    confirm_calls = []
+
+    def confirm_fn(question):
+        confirm_calls.append(question)
+        return True
+
+    app.run_turn(confirm_fn=confirm_fn)
+
+    assert confirm_calls == []
+    tool_result = next(m for m in app.conversation if m.get("role") == "tool")
+    assert "Plan mode is active" in tool_result["content"]
+
+
+def test_toggle_loop_mode_flips_state_and_reports_it(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    messages = []
+    app.out.ok = messages.append
+
+    assert app.loop_mode is False
+    app.toggle_loop_mode()
+    assert app.loop_mode is True
+    assert "on" in messages[-1]
+    app.toggle_loop_mode()
+    assert app.loop_mode is False
+    assert "off" in messages[-1]
+
+
+def test_toggle_graph_mode_flips_state_and_reports_it(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    messages = []
+    app.out.ok = messages.append
+
+    assert app.graph_mode is False
+    app.toggle_graph_mode()
+    assert app.graph_mode is True
+    assert "on" in messages[-1]
+    app.toggle_graph_mode()
+    assert app.graph_mode is False
+    assert "off" in messages[-1]
+
+
+def test_loop_mode_and_graph_mode_are_mutually_exclusive(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    app.out.ok = lambda *_a, **_k: None
+
+    app.toggle_loop_mode()
+    assert app.loop_mode is True
+    app.toggle_graph_mode()
+    assert app.graph_mode is True
+    assert app.loop_mode is False
+
+    app.toggle_loop_mode()
+    assert app.loop_mode is True
+    assert app.graph_mode is False
+
+
+def test_loop_mode_does_exactly_one_verify_pass(tmp_path, monkeypatch):
+    """Once the model gives a final reply with no tool calls, loop mode must
+    inject exactly one re-verify turn and stop after the model's next reply
+    — not loop indefinitely."""
+    from localcoder import repl as repl_module
+
+    app = _make_app(tmp_path, monkeypatch)
+    app.loop_mode = True
+    app.conversation.append({"role": "user", "content": "do the thing"})
+
+    calls = iter(
+        [
+            {"content": "Done.", "tool_calls": None, "done_meta": None},
+            {"content": "Checked — everything's correct.", "tool_calls": None, "done_meta": None},
+        ]
+    )
+    seen_messages = []
+
+    def fake_chat(**kwargs):
+        seen_messages.append(kwargs["messages"])
+        return next(calls)
+
+    monkeypatch.setattr(repl_module, "chat", fake_chat)
+
+    app.run_turn(confirm_fn=lambda _q: True)
+
+    assert len(seen_messages) == 2
+    assert app.conversation[-1] == {"role": "assistant", "content": "Checked — everything's correct."}
+    verify_messages = [m for m in app.conversation if m.get("role") == "user" and "Loop mode" in m.get("content", "")]
+    assert len(verify_messages) == 1
+
+
+def test_run_turn_reports_each_tool_calls_result_not_just_the_call(tmp_path, monkeypatch):
+    """The transcript should show what a tool call actually returned, not
+    just that it was invoked — otherwise the user has no way to tell what
+    happened while a turn was in progress."""
+    from localcoder import repl as repl_module
+
+    app = _make_app(tmp_path, monkeypatch)
+    app.conversation.append({"role": "user", "content": "list the project root"})
+
+    calls = iter(
+        [
+            {
+                "content": "",
+                "tool_calls": [{"id": "1", "function": {"name": "list_dir", "arguments": {}}}],
+                "done_meta": None,
+            },
+            {"content": "Done.", "tool_calls": None, "done_meta": None},
+        ]
+    )
+    monkeypatch.setattr(repl_module, "chat", lambda **kwargs: next(calls))
+
+    reported_calls = []
+    reported_results = []
+    app.out.tool_call = lambda name, args: reported_calls.append((name, args))
+    app.out.tool_result = reported_results.append
+
+    app.run_turn(confirm_fn=lambda _q: True)
+
+    assert reported_calls == [("list_dir", {})]
+    assert len(reported_results) == 1
+    tool_message = next(m for m in app.conversation if m.get("role") == "tool")
+    assert reported_results[0] == json.loads(tool_message["content"])
 
 
 def test_socratic_mode_injects_an_extra_system_message(tmp_path, monkeypatch):

@@ -10,19 +10,21 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from localcoder.provider_errors import ProviderCancelled, ProviderError, ProviderToolsUnsupported
 
-class OllamaError(Exception):
+
+class OllamaError(ProviderError):
     pass
 
 
-class OllamaCancelled(OllamaError):
+class OllamaCancelled(OllamaError, ProviderCancelled):
     """Raised when `cancel_event` was set while a chat() call was streaming —
     lets callers (the full-screen UI's Ctrl+C handling) tell "the user
     cancelled this turn" apart from an actual network/model failure.
     """
 
 
-class OllamaToolsUnsupported(OllamaError):
+class OllamaToolsUnsupported(OllamaError, ProviderToolsUnsupported):
     """Raised when Ollama rejects a request specifically because the active
     model doesn't support tool-calling at all (a 400 whose body says so —
     plenty of models on the Hub are chat-only). Lets callers retry the same

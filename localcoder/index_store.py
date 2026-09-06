@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -20,6 +21,63 @@ CHUNK_LINES = 40
 CHUNK_OVERLAP = 8
 MAX_FILES = 2000  # safety cap, not a tuning knob
 DEFAULT_INDEX_NAME = "default"
+
+# Prose/data files (docs, but also i18n locale files and JSON/YAML content
+# fixtures) are written in the same natural language as a semantic query, so
+# they often out-score the actual code that computes or uses them ("returns
+# doc, not code"). Nudge these down rather than excluding them outright —
+# still findable, just not ahead of equally-relevant code.
+DOC_EXTENSIONS = {".md", ".json", ".yaml", ".yml"}
+DOC_PENALTY = 0.85
+
+# Score boost when a chunk defines a symbol (def/class/import) whose name
+# matches a word in the query — this is what makes "where is the menu coded"
+# return menu.py's `class MenuItem` instead of prose mentioning menus.
+DEFINITION_BOOST = 0.15
+IMPORT_BOOST = 0.08
+
+# def/class at line start (Python, JS/TS, Java, Go, Rust, C-ish...) and
+# import lines. Captures the defined/imported name in group 2.
+_DEF_RE = re.compile(
+    r"^\s*(?:async\s+)?(?:def|class|function|fn|func|struct|interface|type|const|let|var)\s+([A-Za-z_][\w]*)",
+    re.MULTILINE,
+)
+# from/import are statements, so they're anchored to line start; require(...)
+# is an expression that shows up mid-line too (`const x = require('./foo')`,
+# `module.exports = require('./bar')`), so it isn't anchored — just word-
+# bounded so it doesn't match inside a longer identifier like `myrequire(`.
+_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))|\brequire\(['\"]([\w./-]+)",
+    re.MULTILINE,
+)
+_WORD_RE = re.compile(r"[a-zA-Z_][\w]*")
+
+
+def _query_terms(query: str) -> set[str]:
+    """Lowercased words of the query, plus snake_case/camelCase splits so
+    'menu items' matches 'menu_items' / 'menuItems'."""
+    words = {w.lower() for w in _WORD_RE.findall(query)}
+    # also keep split parts of any snake/camel tokens already present
+    for w in list(words):
+        words.update(p for p in re.split(r"[_\s]+", w) if p)
+    return {w for w in words if len(w) >= 3}
+
+
+def _defined_symbols(text: str) -> set[str]:
+    names = {m.group(1).lower() for m in _DEF_RE.finditer(text)}
+    # split snake_case names into parts too: compute_menu_items -> {compute, menu, items}
+    parts: set[str] = set()
+    for n in names:
+        parts.update(p for p in n.split("_") if p)
+    return names | parts
+
+
+def _imported_modules(text: str) -> set[str]:
+    mods: set[str] = set()
+    for m in _IMPORT_RE.finditer(text):
+        raw = next(g for g in m.groups() if g)
+        mods.update(p.lower() for p in re.split(r"[./]", raw) if p)
+    return mods
 
 IGNORE_DIRS = {"node_modules", ".git", "dist", "build", ".next", ".nuxt", "coverage", ".localcoder"}
 INDEXABLE_EXT = {
@@ -167,17 +225,29 @@ def semantic_search(query: str, cwd: Path, host: str, model: str, top_k: int = 8
         return {"error": f'No index named "{name}" built yet. Run /index build.'}
 
     query_embedding = embed(host, idx["model"], [query])[0]
+    terms = _query_terms(query)
 
     scored = []
     for path, file in idx["files"].items():
+        penalty = DOC_PENALTY if Path(path).suffix in DOC_EXTENSIONS else 1.0
+        # filename match: "menu" in the query should lift menu.py itself
+        path_parts = {p.lower() for p in re.split(r"[./_\\-]", path) if p}
+        path_boost = DEFINITION_BOOST if terms & path_parts else 0.0
         for chunk in file["chunks"]:
+            score = cosine_similarity(query_embedding, chunk["embedding"]) * penalty
+            text = chunk["text"]
+            if terms:
+                if terms & _defined_symbols(text):
+                    score += DEFINITION_BOOST
+                if terms & _imported_modules(text):
+                    score += IMPORT_BOOST
             scored.append(
                 {
                     "path": path,
                     "startLine": chunk["startLine"],
                     "endLine": chunk["endLine"],
-                    "text": chunk["text"],
-                    "score": cosine_similarity(query_embedding, chunk["embedding"]),
+                    "text": text,
+                    "score": score + path_boost,
                 }
             )
     scored.sort(key=lambda r: r["score"], reverse=True)
@@ -210,3 +280,13 @@ def list_indexes(cwd: Path) -> list[dict]:
         if stats:
             result.append({"name": name, **stats})
     return result
+
+
+def delete_index(cwd: Path, name: str) -> bool:
+    full = _index_path(cwd, name)
+    if not full.exists():
+        return False
+    full.unlink()
+    if get_active_index_name(cwd) == name and name != DEFAULT_INDEX_NAME:
+        set_active_index_name(cwd, DEFAULT_INDEX_NAME)
+    return True

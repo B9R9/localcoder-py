@@ -7,3 +7,4 @@ __pycache__/
 .localcoder/contexts/
 .localcoder/state.json
 roles/
+localcoder.json

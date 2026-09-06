@@ -58,6 +58,40 @@ def test_flags_beat_local_config(monkeypatch, tmp_path):
     assert cfg.model == "flag-model"
 
 
+def test_provider_defaults_to_ollama(monkeypatch, tmp_path):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home-empty")
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config([])
+    assert cfg.provider == "ollama"
+    assert cfg.model == "devstral-small-2"
+
+
+def test_nvidia_provider_switches_default_model(monkeypatch, tmp_path):
+    """devstral-small-2 is an Ollama model name — nvidia needs its own
+    default rather than inheriting one that doesn't exist on its catalog.
+    """
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home-empty")
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(["--provider", "nvidia"])
+    assert cfg.provider == "nvidia"
+    assert cfg.model == "moonshotai/kimi-k3"
+
+
+def test_nvidia_provider_keeps_an_explicit_model(monkeypatch, tmp_path):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home-empty")
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(["--provider", "nvidia", "--model", "meta/llama-3.3-70b-instruct"])
+    assert cfg.model == "meta/llama-3.3-70b-instruct"
+
+
+def test_api_key_defaults_from_env(monkeypatch, tmp_path):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home-empty")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NVIDIA_API_KEY", "sk-test-123")
+    cfg = load_config([])
+    assert cfg.api_key == "sk-test-123"
+
+
 def test_context_dedup(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()

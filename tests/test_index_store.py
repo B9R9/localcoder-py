@@ -104,3 +104,18 @@ def test_active_index_defaults_to_default_and_can_switch(tmp_path):
     assert index_store.get_active_index_name(tmp_path) == "default"
     index_store.set_active_index_name(tmp_path, "alt")
     assert index_store.get_active_index_name(tmp_path) == "alt"
+
+
+def test_delete_index_removes_file_and_falls_back_active_name_to_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(index_store, "embed", _fake_embed)
+    (tmp_path / "a.py").write_text("x" * 10 + "\n")
+    index_store.build_index(tmp_path, "http://fake", "fake-embed", name="alt")
+    index_store.set_active_index_name(tmp_path, "alt")
+
+    assert index_store.delete_index(tmp_path, "alt") is True
+    assert index_store.get_active_index_name(tmp_path) == "default"
+    assert index_store.index_stats(tmp_path, "alt") is None
+
+
+def test_delete_index_missing_name_returns_false(tmp_path):
+    assert index_store.delete_index(tmp_path, "nope") is False

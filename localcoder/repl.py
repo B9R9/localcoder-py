@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -37,8 +38,17 @@ from localcoder.context import (
     load_context_set_paths,
     save_context_set,
 )
+from localcoder.graph_store import (
+    build_graph,
+    delete_graph,
+    get_active_graph_name,
+    graph_stats,
+    list_graph_maps,
+    set_active_graph_name,
+)
 from localcoder.index_store import (
     build_index,
+    delete_index,
     get_active_index_name,
     index_stats,
     list_indexes,
@@ -46,13 +56,14 @@ from localcoder.index_store import (
     set_active_index_name,
 )
 from localcoder.menu import TOP_COMMANDS
-from localcoder.ollama_client import OllamaCancelled, OllamaError, OllamaToolsUnsupported, chat, list_models, warm_up
+from localcoder.providers import ProviderCancelled, ProviderError, ProviderToolsUnsupported, chat, list_models, warm_up
 from localcoder.roles import create_role, format_role, list_roles, load_role
 from localcoder.sessions import list_sessions, load_session, save_session
 from localcoder.skills import create_skill, format_skill, list_skills, load_skill
+from localcoder.subagents import run_graph_turn
 from localcoder.symbols import find_definition, find_references
 from localcoder.terminal import TerminalError, argv_with_session, open_new_terminal
-from localcoder.tools import execute_tool, get_tools, needs_confirmation
+from localcoder.tools import execute_tool, extract_fallback_tool_call, get_tools, needs_confirmation
 
 # Deliberately short — every extra sentence here is tokens on every request.
 SYSTEM_PROMPT = (
@@ -71,6 +82,37 @@ SOCRATIC_PROMPT = (
     "giving direct answers. You must NOT display, print, or write any code snippets or code blocks. "
     "Guide the user step-by-step to find and write the code themselves, revealing code only if they explicitly ask to just show it. "
     "Stay collaborative and encouraging, not a quiz."
+)
+
+# Appended on top of SYSTEM_PROMPT when plan_mode is on. Write tools are
+# blocked client-side (see run_turn), but the model isn't told that anywhere
+# else — without this it just tries the write tool, gets an error payload,
+# and only then explains itself, which reads as plan mode "not working".
+# This tells it up front to investigate read-only and hand back an actual
+# plan in its text reply instead of attempting writes at all.
+PLAN_MODE_PROMPT = (
+    "Plan mode is on: write tools (write_file, edit_file, run_shell, run_shell_background, "
+    "stop_background_task) are blocked and will fail if you call them. Do not attempt them. "
+    "Instead, use read-only tools to investigate, then reply with a concrete step-by-step plan "
+    "(files to change, commands to run, in order) for the user to review. Wait for the user to "
+    "turn plan mode off before taking any write action."
+)
+
+# Appended on top of SYSTEM_PROMPT when loop_mode is on — tells the model up
+# front that finishing isn't the end of the turn, so the extra verify pass
+# (see run_turn's did_verify_pass handling below) doesn't read as the model
+# being second-guessed for no reason.
+LOOP_MODE_PROMPT = (
+    "Loop mode is on: once you believe you're finished, you will be asked one more time to loop "
+    "back to the start of the request and verify your own work before the turn actually ends."
+)
+
+# The synthetic user turn injected once, when loop_mode is on and the model
+# has just produced a final reply with no more tool calls.
+LOOP_VERIFY_MESSAGE = (
+    "[system] Loop mode: go back over the original request from the start. Re-check that each part "
+    "actually succeeded (re-read files you changed if needed) and fix anything that's wrong or "
+    "incomplete. If everything checks out, say so briefly and stop — do not keep looping."
 )
 
 MAX_TOOL_ROUNDS = 8
@@ -100,6 +142,7 @@ class OutputSink:
     def token(self, piece: str) -> None: ...
     def newline(self) -> None: ...
     def tool_call(self, name: str, args: dict) -> None: ...
+    def tool_result(self, result: dict) -> None: ...
     def verbose_stats(self, meta: dict) -> None: ...
     def info(self, text: str) -> None: ...
     def ok(self, text: str) -> None: ...
@@ -120,6 +163,9 @@ class PrintSink(OutputSink):
 
     def tool_call(self, name: str, args: dict) -> None:
         ui.tool_call(name, args)
+
+    def tool_result(self, result: dict) -> None:
+        ui.tool_result(result)
 
     def verbose_stats(self, meta: dict) -> None:
         ui.verbose_stats(meta)
@@ -189,6 +235,24 @@ class App:
         # questions rather than just handing over the answer/code.
         self.socratic = False
 
+        # plan_mode: off by default — when on, write tools (see WRITE_TOOLS
+        # in tools.py) are blocked outright instead of going through the
+        # normal confirm/decline flow, so the model can only read/search
+        # while the user reviews its plan. Toggle with /plan or Ctrl+P in
+        # the full-screen UI.
+        self.plan_mode = False
+
+        # loop_mode / graph_mode: off by default — two alternative "work
+        # strategies", mutually exclusive with each other (toggling one off
+        # switches the other off too, see toggle_loop_mode/toggle_graph_mode).
+        # loop_mode makes run_turn do one extra self-verify pass once the
+        # model thinks it's done. graph_mode replaces run_turn entirely for
+        # the turn with run_graph_turn (subagents.py): split the request into
+        # independent subtasks, run each in its own sub-agent thread, then
+        # combine the results. Toggle with /loop or Ctrl+L, /graph or Ctrl+G.
+        self.loop_mode = False
+        self.graph_mode = False
+
         # tools_supported: not every model on the Hub does tool-calling
         # (plenty are chat-only) — flips to False the first time Ollama
         # rejects a request specifically for that reason, so later turns
@@ -251,6 +315,10 @@ class App:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if self.socratic:
             messages.append({"role": "system", "content": SOCRATIC_PROMPT})
+        if self.plan_mode:
+            messages.append({"role": "system", "content": PLAN_MODE_PROMPT})
+        if self.loop_mode:
+            messages.append({"role": "system", "content": LOOP_MODE_PROMPT})
         if self.active_role and not self.active_role.get("error"):
             messages.append({"role": "system", "content": format_role(self.active_role)})
         for skill in self.active_skills:
@@ -270,6 +338,7 @@ class App:
             "temperature": self.config.temperature,
             "embed_model": self.config.embed_model,
             "index_name": get_active_index_name(self.cwd),
+            "graph_name": get_active_graph_name(self.cwd),
             "background": self.background,
             "cancel_event": cancel_event,
             "max_subagents": self.config.max_subagents,
@@ -286,36 +355,65 @@ class App:
             "last_prompt_tokens": self.last_prompt_tokens,
             "debug": self.debug or None,
             "socratic": self.socratic or None,
+            "plan_mode": self.plan_mode or None,
+            "loop_mode": self.loop_mode or None,
+            "graph_mode": self.graph_mode or None,
             "tools_disabled": (not self.tools_supported) or None,
         }
 
     # ---- the tool-call loop for one user turn ----------------------------
     def run_turn(self, confirm_fn, cancel_event=None, on_response=None) -> None:
         rounds = 0
+        did_verify_pass = False
         while True:
             rounds += 1
             if rounds > MAX_TOOL_ROUNDS:
-                self.out.warn(f"[localcoder] Stopping after {MAX_TOOL_ROUNDS} tool rounds to avoid a runaway loop.")
+                self.out.warn(f"[localcoder] Hit the {MAX_TOOL_ROUNDS}-round tool limit — asking for a summary of progress so far.")
+                self.conversation.append({
+                    "role": "user",
+                    "content": (
+                        "[system] You've reached the tool-call limit for this turn. Stop calling tools now. "
+                        "Reply with a short summary of what you actually completed, and what (if anything) is left to do."
+                    ),
+                })
+                self.out.assistant_label()
+                try:
+                    result = chat(
+                        config=self.config,
+                        messages=self.build_messages(),
+                        tools=[],
+                        on_token=self.out.token,
+                        cancel_event=cancel_event,
+                        on_response=on_response,
+                    )
+                except ProviderCancelled:
+                    self.out.newline()
+                    self.out.warn("[localcoder] Generation interrupted.")
+                    self.conversation.append({"role": "assistant", "content": "[interrupted by user]"})
+                    return
+                except (ProviderError, ProviderToolsUnsupported) as e:
+                    self.out.newline()
+                    self.out.err(self.format_error(e))
+                    return
+                self.out.newline()
+                self.conversation.append({"role": "assistant", "content": result["content"]})
                 return
 
             self.out.assistant_label()
 
             def attempt(tools):
                 return chat(
-                    host=self.config.host,
-                    model=self.config.model,
+                    config=self.config,
                     messages=self.build_messages(),
                     tools=tools,
-                    num_ctx=self.config.num_ctx,
-                    temperature=self.config.temperature,
                     on_token=self.out.token,
                     cancel_event=cancel_event,
                     on_response=on_response,
                 )
 
             try:
-                result = attempt(get_tools(self.cwd, get_active_index_name(self.cwd)) if self.tools_supported else [])
-            except OllamaToolsUnsupported:
+                result = attempt(get_tools(self.cwd, get_active_index_name(self.cwd), get_active_graph_name(self.cwd)) if self.tools_supported else [])
+            except ProviderToolsUnsupported:
                 # The model itself is fine for plain conversation — only its
                 # lack of tool-calling support caused the failure — so retry
                 # immediately without tools rather than losing the turn.
@@ -327,21 +425,21 @@ class App:
                 )
                 try:
                     result = attempt([])
-                except OllamaCancelled:
+                except ProviderCancelled:
                     self.out.newline()
                     self.out.warn("[localcoder] Generation interrupted.")
                     self.conversation.append({"role": "assistant", "content": "[interrupted by user]"})
                     return
-                except OllamaError as e:
+                except ProviderError as e:
                     self.out.newline()
                     self.out.err(self.format_error(e))
                     return
-            except OllamaCancelled:
+            except ProviderCancelled:
                 self.out.newline()
                 self.out.warn("[localcoder] Generation interrupted.")
                 self.conversation.append({"role": "assistant", "content": "[interrupted by user]"})
                 return
-            except OllamaError as e:
+            except ProviderError as e:
                 self.out.newline()
                 self.out.err(self.format_error(e))
                 return
@@ -359,10 +457,22 @@ class App:
 
             tool_calls = result.get("tool_calls")
             if not tool_calls:
-                self.conversation.append({"role": "assistant", "content": result["content"]})
-                return
-
-            self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
+                fallback = extract_fallback_tool_call(result.get("content") or "")
+                if fallback is None:
+                    self.conversation.append({"role": "assistant", "content": result["content"]})
+                    if self.loop_mode and not did_verify_pass:
+                        did_verify_pass = True
+                        self.out.info("[loop mode] Reached the end — looping back to verify the work.")
+                        self.conversation.append({"role": "user", "content": LOOP_VERIFY_MESSAGE})
+                        continue
+                    return
+                # Model printed the call as JSON text instead of using the
+                # structured tool-calling field — dispatch it anyway rather
+                # than showing raw JSON and ending the turn with nothing done.
+                tool_calls = [{"id": None, "function": {"name": fallback["name"], "arguments": fallback["arguments"]}}]
+                self.conversation.append({"role": "assistant", "content": "", "tool_calls": tool_calls})
+            else:
+                self.conversation.append({"role": "assistant", "content": result["content"], "tool_calls": tool_calls})
 
             for i, call in enumerate(tool_calls):
                 fn = call.get("function") or {}
@@ -379,13 +489,17 @@ class App:
 
                 self.out.tool_call(name, args)
 
-                if needs_confirmation(name):
+                if self.plan_mode and needs_confirmation(name):
+                    result_payload = {"error": "Plan mode is active — write actions are blocked until the user turns it off."}
+                elif needs_confirmation(name):
                     approved = confirm_fn("[localcoder] Approve this action?")
                     result_payload = (
                         execute_tool(name, args, self.tool_ctx(cancel_event)) if approved else {"error": "User declined this action."}
                     )
                 else:
                     result_payload = execute_tool(name, args, self.tool_ctx(cancel_event))
+
+                self.out.tool_result(result_payload)
 
                 self.conversation.append(
                     {"role": "tool", "tool_call_id": tool_call_id, "content": json.dumps(result_payload)}
@@ -668,7 +782,85 @@ class App:
             else:
                 self.out.info("[index] No index built yet. Run /index build.")
             return
-        self.out.info("[index] Usage: /index build [name] [model] | /index use <name> | /index list | /index status")
+        if sub == "delete" and len(parts) > 1:
+            name = parts[1]
+            if delete_index(self.cwd, name):
+                self.out.ok(f'[index] Deleted "{name}".')
+            else:
+                self.out.warn(f'[index] No index named "{name}".')
+            return
+        self.out.info("[index] Usage: /index build [name] [model] | /index use <name> | /index list | /index status | /index delete <name>")
+
+    def handle_graph_map_command(self, rest: str) -> None:
+        parts = rest.strip().split()
+        sub = parts[0] if parts else None
+
+        if sub == "build":
+            # /graph_map build [name] — name defaults to whatever graph map
+            # is currently active ("default" if none yet). Unlike /index
+            # build, there's no embed model: edges come from a cheap regex
+            # scan of import statements, not an embedding call.
+            name = parts[1] if len(parts) > 1 else get_active_graph_name(self.cwd)
+            self.out.info(f'[graph_map] Building "{name}" (scanning import statements)...')
+
+            if isinstance(self.out, PrintSink):
+                def on_progress(path, i, total):
+                    sys.stdout.write(f"\r[graph_map] {i}/{total} {path}".ljust(80))
+                    sys.stdout.flush()
+            else:
+                def on_progress(path, i, total):
+                    return None
+
+            try:
+                result = build_graph(self.cwd, on_progress, name=name)
+                if isinstance(self.out, PrintSink):
+                    print()
+                set_active_graph_name(self.cwd, name)
+                self.out.ok(f"[graph_map] Done — {result['fileCount']} files, {result['edgeCount']} import edges.")
+            except Exception as err:  # noqa: BLE001 — surface any unexpected failure to the user
+                if isinstance(self.out, PrintSink):
+                    print()
+                self.out.err(f"[graph_map] Failed: {err}")
+            return
+        if sub == "use" and len(parts) > 1:
+            name = parts[1]
+            if not graph_stats(self.cwd, name):
+                self.out.warn(f'[graph_map] No graph map named "{name}". Use /graph_map build {name} to create one.')
+                return
+            set_active_graph_name(self.cwd, name)
+            self.out.ok(f'[graph_map] Now using "{name}".')
+            return
+        if sub == "list":
+            maps = list_graph_maps(self.cwd)
+            if not maps:
+                self.out.info("[graph_map] No graph map built yet. Run /graph_map build.")
+                return
+            active = get_active_graph_name(self.cwd)
+            self.out.info(
+                "\n".join(
+                    f"  - {m['name']}{' (active)' if m['name'] == active else ''}: "
+                    f"{m['fileCount']} files, {m['edgeCount']} import edges"
+                    for m in maps
+                )
+            )
+            return
+        if sub == "status":
+            name = get_active_graph_name(self.cwd)
+            stats = graph_stats(self.cwd, name)
+            if stats:
+                label = "" if name == "default" else f'"{name}": '
+                self.out.info(f"[graph_map] {label}{stats['fileCount']} files, {stats['edgeCount']} import edges, built {stats['updatedAt']}")
+            else:
+                self.out.info("[graph_map] No graph map built yet. Run /graph_map build.")
+            return
+        if sub == "delete" and len(parts) > 1:
+            name = parts[1]
+            if delete_graph(self.cwd, name):
+                self.out.ok(f'[graph_map] Deleted "{name}".')
+            else:
+                self.out.warn(f'[graph_map] No graph map named "{name}".')
+            return
+        self.out.info("[graph_map] Usage: /graph_map build [name] | /graph_map use <name> | /graph_map list | /graph_map status | /graph_map delete <name>")
 
     def handle_bg_command(self, rest: str) -> None:
         parts = rest.strip().split(maxsplit=1)
@@ -725,9 +917,11 @@ class App:
             self.out.ok(f'[model] Now using "{name}".')
             return
         if sub == "list":
-            names = list_models(self.config.host)
+            names = list_models(self.config)
             if names:
                 self.out.info("\n".join(f"  - {n}" for n in names))
+            elif self.config.provider == "nvidia":
+                self.out.warn("[model] Could not reach the NVIDIA API, or no NVIDIA_API_KEY is set.")
             else:
                 self.out.warn("[model] Could not reach Ollama, or no models pulled yet.")
             return
@@ -763,9 +957,17 @@ class App:
             except ValueError:
                 self.out.warn(f'[set] "{value}" is not a valid integer.')
             return
+        if sub == "provider" and value is not None:
+            if value not in ("ollama", "nvidia"):
+                self.out.warn(f'[set] "{value}" is not a known provider — use "ollama" or "nvidia".')
+                return
+            self.config.provider = value
+            self.tools_supported = True  # give the new provider/model a fresh chance
+            self.out.ok(f'[set] provider = "{value}". Use /model use <name> to pick a model for it.')
+            return
         self.out.info(
-            "[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name> | "
-            "/set max_subagents <value>"
+            "[set] Usage: /set temperature <value> | /set num_ctx <value> | /set embed_model <name> "
+            "| /set max_subagents <value> | /set provider <ollama|nvidia>"
         )
 
     def handle_stats_command(self) -> None:
@@ -798,6 +1000,34 @@ class App:
             f"{'guide you with questions instead of giving direct answers' if self.socratic else 'answer directly again'}."
         )
 
+    def toggle_plan_mode(self) -> None:
+        self.plan_mode = not self.plan_mode
+        state = "on" if self.plan_mode else "off"
+        self.out.ok(
+            f"[plan mode] {state} — write actions (editing/writing files, running commands) will "
+            f"{'be blocked until you turn this off again' if self.plan_mode else 'go through the normal confirmation prompt again'}."
+        )
+
+    def toggle_loop_mode(self) -> None:
+        self.loop_mode = not self.loop_mode
+        if self.loop_mode:
+            self.graph_mode = False
+        state = "on" if self.loop_mode else "off"
+        self.out.ok(
+            f"[loop mode] {state} — "
+            f"{'once a reply looks finished, one extra pass will loop back and verify it' if self.loop_mode else 'replies finish as soon as the model is done, no extra verify pass'}."
+        )
+
+    def toggle_graph_mode(self) -> None:
+        self.graph_mode = not self.graph_mode
+        if self.graph_mode:
+            self.loop_mode = False
+        state = "on" if self.graph_mode else "off"
+        self.out.ok(
+            f"[graph mode] {state} — "
+            f"{'requests will be split across parallel sub-agents and combined at the end' if self.graph_mode else 'requests go through a single agent again'}."
+        )
+
     def handle_summary_command(self, rest: str, cancel_event=None, on_response=None) -> None:
         path = rest.strip() or None
         if not self.conversation:
@@ -811,19 +1041,16 @@ class App:
         self.out.info("[summary] Asking the model for a recap...")
         try:
             result = chat(
-                host=self.config.host,
-                model=self.config.model,
+                config=self.config,
                 messages=messages,
                 tools=[],
-                num_ctx=self.config.num_ctx,
-                temperature=self.config.temperature,
                 cancel_event=cancel_event,
                 on_response=on_response,
             )
-        except OllamaCancelled:
+        except ProviderCancelled:
             self.out.warn("[summary] Cancelled.")
             return
-        except OllamaError as e:
+        except ProviderError as e:
             self.out.err(self.format_error(e))
             return
         text = result["content"]
@@ -874,13 +1101,20 @@ class App:
         if not results:
             self.out.info("[search] (no matches, even by meaning)")
             return
-        for r in results:
+        for i, r in enumerate(results):
+            # A blank line between hits, plus a differently-colored header
+            # (ok, not dim) for the path/score line — otherwise every hit's
+            # header blends into the previous hit's snippet and the whole
+            # list reads as one undifferentiated block.
+            if i:
+                self.out.newline()
             # Show several lines of the actual chunk, not just its first line —
             # a single line is often a module docstring/comment, which reads as
             # "just doc, not code" even though the code follows right after it.
             lines = r["text"].strip("\n").splitlines()[:6]
             snippet = "\n".join(f"    {line}" for line in lines)
-            self.out.info(f"  {r['path']}:{r['startLine']}-{r['endLine']} ({r['score']:.2f})\n{snippet}")
+            self.out.ok(f"  {r['path']}:{r['startLine']}-{r['endLine']} ({r['score']:.2f})")
+            self.out.info(snippet)
 
     def handle_find_command(self, rest: str) -> None:
         symbol = rest.strip()
@@ -969,6 +1203,15 @@ def _dispatch_command(app: App, trimmed: str, cancel_event=None, on_response=Non
     if trimmed == "/socratic":
         app.toggle_socratic()
         return True
+    if trimmed == "/plan":
+        app.toggle_plan_mode()
+        return True
+    if trimmed == "/loop":
+        app.toggle_loop_mode()
+        return True
+    if trimmed == "/graph":
+        app.toggle_graph_mode()
+        return True
     if trimmed.startswith("/summary"):
         app.handle_summary_command(trimmed[len("/summary"):], cancel_event=cancel_event, on_response=on_response)
         return True
@@ -980,6 +1223,9 @@ def _dispatch_command(app: App, trimmed: str, cancel_event=None, on_response=Non
         return True
     if trimmed.startswith("/index"):
         app.handle_index_command(trimmed[len("/index"):])
+        return True
+    if trimmed.startswith("/graph_map"):
+        app.handle_graph_map_command(trimmed[len("/graph_map"):])
         return True
     if trimmed.startswith("/session"):
         app.handle_session_command(trimmed[len("/session"):])
@@ -1072,8 +1318,12 @@ def _run_loop(app: App) -> None:
         ui.user_separator()
         app.apply_at_mentions(trimmed)
         app.conversation.append({"role": "user", "content": trimmed})
+        turn_start = time.perf_counter()
         try:
-            app.run_turn(confirm)
+            if app.graph_mode:
+                run_graph_turn(app, confirm)
+            else:
+                app.run_turn(confirm)
             app.autosave()
         except KeyboardInterrupt:
             # Cancel just this turn — not the whole app. A synthetic note
@@ -1085,6 +1335,9 @@ def _run_loop(app: App) -> None:
             app.autosave()
         except Exception as err:  # noqa: BLE001 — never let one bad turn kill the REPL
             ui.err(app.format_error(err))
+        finally:
+            app.out.newline()
+            ui.info(f"[localcoder] {time.perf_counter() - turn_start:.1f}s")
         print()
 
 
@@ -1123,8 +1376,8 @@ def main() -> None:
     if app.config.warm_up:
         ui.info("[localcoder] Warming up the model...")
         try:
-            warm_up(app.config.host, app.config.model)
-        except OllamaError as err:
+            warm_up(app.config)
+        except ProviderError as err:
             ui.warn(f"[localcoder] Warm-up skipped: {err}")
         print()
 

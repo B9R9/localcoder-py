@@ -186,15 +186,17 @@ alias localcoder="PYTHONPATH=/chemin/vers/localcoder-py python3 -m localcoder"
   le contexte actuel
 - `/context sets` — liste les jeux de contexte sauvegardés pour ce projet
 - `/model use <nom>` — change de modèle pour le reste de la session
-- `/model list` — liste les modèles déjà pull dans Ollama (`/api/tags`)
+- `/model list` — liste les modèles disponibles : `/api/tags` d'Ollama, ou
+  le catalogue NVIDIA (`GET /models`) si `provider` est `nvidia`
 - `/set temperature <val>` — change la température pour le reste de la
   session
 - `/set num_ctx <val>` — change la taille de la fenêtre de contexte pour
   le reste de la session
-- `/set max_subagents <val>` — change le nombre max de branches parallèles
-  pour `spawn_subagents` pour le reste de la session (défaut 4, voir
-  `--max-subagents` ; chaque branche est une conversation + requête Ollama
-  de plus en mémoire, à ajuster selon la RAM dispo)
+- `/set max_subagents <val>` — change le nombre maximal de branches
+  parallèles pour `spawn_subagents` (défaut 4, voir `--max-subagents`)
+- `/set provider <ollama|nvidia>` — bascule entre Ollama local et l'API
+  NVIDIA sans relancer localcoder ; utilisez ensuite `/model use <nom>`
+  pour choisir un modèle valide pour le nouveau provider
 - `/stats` — résumé cumulé de la session (modèle, tours, tokens, temps
   total, % de la fenêtre de contexte utilisé au dernier tour)
 - `/verbose` — active/désactive le détail par tour façon
@@ -361,6 +363,10 @@ localcoder --session auth-bug --role code-review   # reprend/démarre le fil "au
 localcoder --verbose         # ou -v : détail par tour dès le départ
 localcoder --no-warm-up      # saute le préchargement du modèle au démarrage
 localcoder --max-subagents 2 # limite les branches parallèles de spawn_subagents (défaut 4)
+# Provider NVIDIA (API OpenAI-compatible, hébergée) au lieu d'Ollama local
+export NVIDIA_API_KEY=nvapi-...
+localcoder --provider nvidia --model moonshotai/kimi-k3
+localcoder --provider nvidia --base-url https://integrate.api.nvidia.com/v1 --api-key nvapi-...
 # Mode dév : relance à chaque changement de fichier surveillé
 localcoder --watch
 localcoder --watch-path roles --watch-path tests/base.py   # surveille aussi ces chemins
@@ -519,6 +525,12 @@ Au lieu de répéter les flags, crée `~/.localcoder.json` (global) ou
 Ordre de priorité : flags CLI > `./localcoder.json` > `~/.localcoder.json`
 > défauts. `context` fait exception — les chemins des trois sources
 s'additionnent au lieu de s'écraser.
+
+Pour utiliser l'API NVIDIA au lieu d'Ollama : `"provider": "nvidia"`, et
+éventuellement `"base_url"` (défaut : `https://integrate.api.nvidia.com/v1`)
+si tu pointes vers un autre déploiement OpenAI-compatible. `api_key` peut
+aussi être mis ici, mais préfère la variable d'environnement
+`NVIDIA_API_KEY` pour ne pas committer un secret dans `localcoder.json`.
 
 **Note** : les clés sont en `snake_case` (`num_ctx`, `auto_approve`,
 `embed_model`) contrairement à la version Node (`numCtx`, `autoApprove`,

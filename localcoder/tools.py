@@ -7,11 +7,13 @@ prerequisite (an index, or Universal Ctags) actually exists.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
+from localcoder.graph_store import graph_neighbors, graph_stats
 from localcoder.index_store import index_stats, semantic_search
 from localcoder.symbols import find_definition, find_references, has_ctags
 
@@ -334,6 +336,19 @@ SEMANTIC_SEARCH_TOOL = {
     },
 }
 
+GRAPH_NEIGHBORS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "graph_neighbors",
+        "description": "Look up the direct import relationships of one file from the built code graph: files it imports, and files that import it. One hop per call — call again on a returned neighbor to go further. Use this to navigate a large codebase without reading every file.",
+        "parameters": {
+            "type": "object",
+            "properties": {"file": {"type": "string", "description": "Project-relative path of the file to look up."}},
+            "required": ["file"],
+        },
+    },
+}
+
 SYMBOL_TOOLS = [
     {
         "type": "function",
@@ -375,10 +390,12 @@ WRITE_TOOLS = {
 }
 
 
-def get_tools(cwd: Path, index_name: str = "default") -> list[dict]:
+def get_tools(cwd: Path, index_name: str = "default", graph_name: str = "default") -> list[dict]:
     tools = list(BASE_TOOLS)
     if index_stats(cwd, index_name):
         tools.append(SEMANTIC_SEARCH_TOOL)
+    if graph_stats(cwd, graph_name):
+        tools.append(GRAPH_NEIGHBORS_TOOL)
     if has_ctags():
         tools.extend(SYMBOL_TOOLS)
     return tools
@@ -386,6 +403,48 @@ def get_tools(cwd: Path, index_name: str = "default") -> list[dict]:
 
 def needs_confirmation(name: str) -> bool:
     return name in WRITE_TOOLS
+
+
+ALL_TOOL_NAMES = (
+    {t["function"]["name"] for t in BASE_TOOLS}
+    | {SEMANTIC_SEARCH_TOOL["function"]["name"]}
+    | {GRAPH_NEIGHBORS_TOOL["function"]["name"]}
+    | {t["function"]["name"] for t in SYMBOL_TOOLS}
+)
+
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def extract_fallback_tool_call(content: str) -> dict | None:
+    """Some models (small/quantized ones especially, served through Ollama)
+    don't fill the structured tool_calls field on the response and instead
+    print the call as a bare JSON object in the plain text content. Ollama
+    then reports that as an ordinary text turn — the tool never actually
+    runs, and the model has to be told "continue" for anything to happen,
+    over and over, with no visible progress. Recognize that shape so it can
+    be dispatched like a real tool call instead of shown as raw JSON.
+    """
+    text = content.strip()
+    match = _FENCED_JSON_RE.search(text)
+    if match:
+        text = match.group(1).strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    name = data.get("name")
+    if name not in ALL_TOOL_NAMES:
+        return None
+    args = data.get("arguments", data.get("parameters"))
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return None
+    return {"name": name, "arguments": args}
 
 
 def execute_tool(name: str, args: dict, ctx: dict) -> dict:
@@ -494,6 +553,12 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
                 for r in result["results"]
             ]
         }
+
+    if name == "graph_neighbors":
+        result = graph_neighbors(args["file"], cwd=cwd, name=ctx.get("graph_name", "default"))
+        if "error" in result:
+            return result
+        return {"imports": result["imports"], "importedBy": result["importedBy"]}
 
     if name == "find_definition":
         return find_definition(args["symbol"], cwd)
