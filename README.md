@@ -1,285 +1,276 @@
 # localcoder (Python)
 
-Réécriture complète en Python de [localcoder](../localcoder) (la version
-Node) — même philosophie : un agent de code minimal pour Ollama, contexte
-explicite, empreinte mémoire réduite. La raison du passage en Python :
-le menu interactif du terminal fait main en Node (mode raw + codes ANSI)
-demandait de tout réinventer soi-même ; ici c'est
-[`prompt_toolkit`](https://python-prompt-toolkit.readthedocs.io/), une lib
-mature construite exactement pour ça (complétion, navigation clavier,
-Ctrl+C/Ctrl+D propres) — une seule vraie dépendance, tout le reste est la
-bibliothèque standard.
+Full Python rewrite of [localcoder](../localcoder) (the Node version) — same
+philosophy: a minimal code agent for Ollama, explicit context, small memory
+footprint. Why switch to Python: the Node version's hand-rolled interactive
+terminal menu (raw mode + ANSI codes) meant reinventing everything from
+scratch; here it's
+[`prompt_toolkit`](https://python-prompt-toolkit.readthedocs.io/), a mature
+library built exactly for this (completion, keyboard navigation, clean
+Ctrl+C/Ctrl+D) — one real dependency, everything else is the standard
+library.
 
-▍ **localcoder** 🐼 — Lazzy le panda, ton agent de code local-first, contexte
-explicite, zéro bloat.
+▍ **localcoder** 🐼 — Lazzy the panda, your local-first code agent, explicit
+context, zero bloat.
 
-Ce que ça fait :
-- Parle directement à l'API native d'Ollama (`/api/chat`), pas à la couche
-  OpenAI-compatible — pour fixer `num_ctx` explicitement à chaque requête.
-  `urllib` (stdlib), pas de client HTTP tiers.
-- Expose 6 tools de base — `read_file`, `list_dir`, `search_code`,
-  `edit_file`, `write_file`, `run_shell` — plus `semantic_search` (si un
-  index existe, `/index build`) et `find_definition`/`find_references`
-  (si Universal Ctags est installé). Chaque tool optionnel n'apparaît dans
-  la liste envoyée au modèle que si sa dépendance est réellement là —
-  sinon zéro coût en tokens.
-- Deux tools de délégation à des sous-agents, même endpoint/modèle Ollama que
-  la conversation principale mais chacun avec sa propre fenêtre de contexte
-  jetable — le modèle principal ne récupère que leur réponse finale, jamais
-  leurs appels d'outils intermédiaires, pour ne pas saturer son propre
-  contexte sur une recherche large. Les deux sont en lecture seule (pas
-  d'écriture de fichier, pas de `run_shell`) puisqu'ils tournent sans
-  personne pour approuver une action pendant leur exécution :
-    - `spawn_subagent` (mode **loop**) — une tâche d'investigation à la
-      fois, séquentielle : repérer comment quelque chose fonctionne dans
-      une zone du code, par exemple.
-    - `spawn_subagents` (mode **graph**, lecture seule) — plusieurs tâches
-      indépendantes à la fois, en parallèle (4 branches max par défaut,
-      voir `/set max_subagents`), quand le travail se découpe naturellement
-      en parties qui ne dépendent pas les unes des autres (ex. investiguer
-      le module A et le module B séparément) ; chaque branche renvoie sa
-      propre réponse, et c'est au modèle principal de les recomposer en une
-      réponse finale.
-    - `spawn_coding_subagents` (mode **graph**, avec écriture) — même
-      découpage en parallèle, mais chaque sous-agent peut aussi écrire des
-      fichiers et lancer des commandes, sans confirmation à chaque action :
-      il travaille sur sa propre branche git isolée (`git worktree`),
-      créée à partir d'une branche de travail commune elle-même créée
-      depuis ta branche courante. Une fois toutes les tâches terminées,
-      chaque branche est committée et mergée dans la branche de travail
-      (un conflit est signalé, pas silencieusement perdu). Cette branche de
-      travail n'est **jamais** mergée automatiquement dans ta branche —
-      il faut le faire toi-même via `run_shell` (donc avec confirmation,
-      comme n'importe quelle écriture). Nécessite que le projet soit déjà
-      un dépôt git, et ne voit que les changements **commités** (commit ou
-      stash tes modifications en cours avant d'utiliser ce tool). Lancer
-      `spawn_coding_subagents` lui-même demande une confirmation, comme
-      `write_file`/`edit_file`/`run_shell`.
-- `search_code` utilise `ripgrep` s'il est installé, sinon `grep` en repli.
-- `edit_file` fait un remplacement ciblé (ancien texte → nouveau texte,
-  doit matcher exactement une fois) plutôt que de réécrire tout le fichier.
-- Demande confirmation avant toute action qui modifie quelque chose
-  (écriture de fichier, commande shell) — sauf en mode `--yolo`.
-- Contexte explicite : `--context`, config, ou `/context add` en session —
-  fichier, dossier ou glob — jamais de scan automatique du projet.
-- Rôle explicite : un seul actif à la fois (`--role`, `/role use`).
-- Sessions nommées et persistantes (`--session <nom>`), historique + rôle,
-  d'une invocation à l'autre.
-- Recherche sémantique optionnelle (`/index build`) et recherche par
-  symboles (`find_definition`/`find_references`, via Universal Ctags).
-- Interface plein écran dans un vrai terminal, façon Vibe : historique
-  défilable en haut, ligne de saisie toujours visible en bas, menu `/`
-  centré à l'écran — voir "Interface plein écran" plus bas.
-- Warm-up au démarrage : un appel silencieux à Ollama précharge le modèle
-  en mémoire pendant qu'un petit panda anime la barre de statut, pour que
-  ton premier vrai message ne paie pas le coût du cold-start
-  (`--no-warm-up` pour désactiver).
-- Change de modèle, de température ou de taille de contexte en cours de
-  session (`/model use`, `/set temperature`, `/set num_ctx`) — sans
-  relancer localcoder.
-- Stats à la `ollama run --verbose` : `/stats` pour un résumé cumulé de la
-  session, `/verbose` (ou `--verbose`) pour un détail après chaque réponse
-  (durées et débit de prompt-eval/eval).
-- `/summary` : demande au modèle un récapitulatif de la conversation en
-  cours, affiché à l'écran ou écrit dans un fichier.
-- `/search` et `/find` : recherche directe (texte ou symbole) sans passer
-  par le modèle — pour toi, pas pour l'agent.
-- Mentions `@chemin` dans un message : `corrige @src/auth.js` ajoute ce
-  fichier au contexte au vol, en plus/à la place de `/context add`.
-- Rôle (une seule persona active, `/role use`) **et** skills (plusieurs
-  actifs en même temps, `/skill use`) — les deux peuvent être créés depuis
-  l'interface avec `/role create`/`/skill create`, sans sortir de
-  localcoder.
-- Mode dév `--watch` : lance le REPL dans un sous-processus et le recharge
-  automatiquement dès qu'un fichier surveillé change — pratique pour
-  développer localcoder lui-même (voir « Mode dév (`--watch`) » plus bas).
-- `Ctrl+C` interrompt la génération en cours (le tour, pas tout le
-  programme) ; à la ligne de commande vide, `Ctrl+C`/`Ctrl+D` quitte.
-- Aucune étape de build : `pip install`, puis `python -m localcoder`.
+What it does:
+- Talks directly to Ollama's native API (`/api/chat`), not the
+  OpenAI-compatible layer — so `num_ctx` can be set explicitly on every
+  request. `urllib` (stdlib), no third-party HTTP client.
+- Exposes 6 core tools — `read_file`, `list_dir`, `search_code`,
+  `edit_file`, `write_file`, `run_shell` — plus `semantic_search` (if an
+  index exists, `/index build`) and `find_definition`/`find_references`
+  (if Universal Ctags is installed). Each optional tool only appears in
+  the list sent to the model if its dependency is actually present —
+  otherwise zero token cost.
+- Two tools for delegating to sub-agents, using the same Ollama
+  endpoint/model as the main conversation but each with its own disposable
+  context window — the main model only gets their final answer back, never
+  their intermediate tool calls, so a broad search doesn't flood its own
+  context. Both are read-only (no file writes, no `run_shell`) since they
+  run with nobody around to approve an action while they execute:
+    - `spawn_subagent` (**loop** mode) — one investigation task at a time,
+      sequential: e.g. figure out how something works in a given area of
+      the code.
+    - `spawn_subagents` (**graph** mode, read-only) — several independent
+      tasks at once, in parallel (4 branches max by default, see
+      `/set max_subagents`), when the work naturally splits into parts that
+      don't depend on each other (e.g. investigate module A and module B
+      separately); each branch returns its own answer, and it's up to the
+      main model to combine them into a final response.
+    - `spawn_coding_subagents` (**graph** mode, with writes) — the same
+      parallel split, but each sub-agent can also write files and run
+      commands, without confirmation on every action: it works on its own
+      isolated git branch (`git worktree`), created from a shared working
+      branch that is itself created from your current branch. Once all
+      tasks finish, each branch is committed and merged into the working
+      branch (a conflict is reported, never silently dropped). This
+      working branch is **never** automatically merged into yours — you
+      have to do that yourself via `run_shell` (so with confirmation, like
+      any write). Requires the project to already be a git repo, and only
+      sees **committed** changes (commit or stash your work in progress
+      before using this tool). Launching `spawn_coding_subagents` itself
+      requires confirmation, like `write_file`/`edit_file`/`run_shell`.
+- `search_code` uses `ripgrep` if installed, falling back to `grep`
+  otherwise.
+- `edit_file` does a targeted replacement (old text → new text, must match
+  exactly once) rather than rewriting the whole file.
+- Asks for confirmation before any action that changes something (file
+  write, shell command) — except in `--yolo` mode.
+- Explicit context: `--context`, config, or `/context add` in-session —
+  file, folder, or glob — never an automatic project scan.
+- Explicit role: only one active at a time (`--role`, `/role use`).
+- Named, persistent sessions (`--session <name>`), history + role, from
+  one run to the next.
+- Optional semantic search (`/index build`) and symbol search
+  (`find_definition`/`find_references`, via Universal Ctags).
+- Full-screen interface in a real terminal, Vibe-style: scrollable history
+  at the top, input line always visible at the bottom, `/` menu centered on
+  screen — see "Full-screen interface" below.
+- Warm-up on startup: a silent call to Ollama preloads the model into
+  memory while a little panda animates the status bar, so your first real
+  message doesn't pay the cold-start cost (`--no-warm-up` to disable).
+- Switch model, temperature, or context size mid-session (`/model use`,
+  `/set temperature`, `/set num_ctx`) — without restarting localcoder.
+- Stats à la `ollama run --verbose`: `/stats` for a cumulative session
+  summary, `/verbose` (or `--verbose`) for detail after each response
+  (prompt-eval/eval durations and throughput).
+- `/summary`: asks the model for a recap of the current conversation,
+  shown on screen or written to a file.
+- `/search` and `/find`: direct search (text or symbol) without going
+  through the model — for you, not the agent.
+- `@path` mentions in a message: `fix @src/auth.js` adds that file to the
+  context on the fly, in addition to or instead of `/context add`.
+- Role (a single active persona, `/role use`) **and** skills (several
+  active at once, `/skill use`) — both can be created from the interface
+  with `/role create`/`/skill create`, without leaving localcoder.
+- Dev mode `--watch`: runs the REPL in a subprocess and reloads it
+  automatically as soon as a watched file changes — handy for developing
+  localcoder itself (see "Dev mode (`--watch`)" below).
+- `Ctrl+C` interrupts the current generation (the turn, not the whole
+  program); on an empty command line, `Ctrl+C`/`Ctrl+D` exits.
+- No build step: `pip install`, then `python -m localcoder`.
 
 ## Installation
 
-Prérequis : Python 3.10+, un serveur Ollama qui tourne en local avec un
-modèle déjà pull (`devstral-small-2` ou `qwen3-coder:30b`).
+Prerequisites: Python 3.10+, an Ollama server running locally with a model
+already pulled (`devstral-small-2` or `qwen3-coder:30b`).
 
 ```bash
 cd localcoder-py
-pip install -r requirements.txt         # juste prompt_toolkit
-# ou, pour avoir la commande `localcoder` disponible partout :
+pip install -r requirements.txt         # just prompt_toolkit
+# or, to have the `localcoder` command available everywhere:
 pip install -e .
 ```
 
-## Utilisation
+## Usage
 
-Depuis la racine du projet sur lequel tu veux travailler :
+From the root of the project you want to work on:
 
 ```bash
-# sans installation (juste prompt_toolkit dans le PYTHONPATH) :
-PYTHONPATH=/chemin/vers/localcoder-py python3 -m localcoder
+# without installing (just prompt_toolkit on the PYTHONPATH):
+PYTHONPATH=/path/to/localcoder-py python3 -m localcoder
 
-# ou, après `pip install -e .` :
+# or, after `pip install -e .`:
 localcoder
 ```
 
-**Pour développer localcoder lui-même** : tout-en-un avec `./dev.sh`.
+**To develop localcoder itself**: everything in one go with `./dev.sh`.
 
 ```bash
-./dev.sh               # venv + prompt_toolkit auto, puis lancement avec --watch (recharge à chaque modif)
-./dev.sh --no-watch    # sans rechargement automatique
-./dev.sh --warm-up     # active le preload du modèle au démarrage
-./dev.sh --session x   # tout autre argument passe tel quel à localcoder
+./dev.sh               # auto venv + prompt_toolkit, then launches with --watch (reloads on every change)
+./dev.sh --no-watch    # without automatic reload
+./dev.sh --warm-up     # enables model preload on startup
+./dev.sh --session x   # any other argument is passed through to localcoder as-is
 ```
 
-Le script crée `.venv/` et installe les dépendances au premier lancement,
-choisit un Python ≥ 3.10 (3.11/3.12 s'ils existent, sinon 3.10), et démarre
-par défaut avec `--no-warm-up` — en mode `--watch`, chaque rechargement
-relance un processus et on ne veut pas repayer le preload du modèle à
-chaque édition. Utilise `--warm-up` si tu veux démarrer une vraie
-conversation.
+The script creates `.venv/` and installs dependencies on first run, picks a
+Python ≥ 3.10 (3.11/3.12 if available, otherwise 3.10), and starts with
+`--no-warm-up` by default — in `--watch` mode, every reload restarts a
+process and we don't want to pay the model preload cost on every edit. Use
+`--warm-up` if you want to start a real conversation.
 
-Alias pratique dans ton `.zshrc` :
+Handy alias for your `.zshrc`:
 
 ```bash
-alias localcoder="PYTHONPATH=/chemin/vers/localcoder-py python3 -m localcoder"
+alias localcoder="PYTHONPATH=/path/to/localcoder-py python3 -m localcoder"
 ```
 
-### Commandes
+### Commands
 
-- `/index build [nom] [modèle]` — (re)construit l'index sémantique ; ne
-  ré-embedde que les fichiers dont le contenu a changé depuis le dernier
-  build. Sans argument, reconstruit l'index actif avec `embed_model` de la
-  config. Un nom permet de garder plusieurs index côte à côte (chacun son
-  fichier), par exemple pour comparer deux modèles d'embedding ; construire
-  un index le rend actif
-- `/index use <nom>` — bascule l'index actif vers un index déjà construit
-- `/index list` — liste tous les index construits pour ce projet (modèle,
-  nombre de fichiers/chunks, lequel est actif)
-- `/index status` — nombre de fichiers/chunks indexés, modèle utilisé,
-  date de dernière construction, pour l'index actif
-- `/session save [nom]` — nomme (si besoin) et sauvegarde la session
-  courante ; sans argument, sauvegarde sous le nom déjà actif
-- `/session load <nom>` — charge une session sauvegardée (historique +
-  rôle + contexte associés), remplace l'état courant
-- `/session new <nom>` — démarre une session vierge sous ce nom
-- `/session list` — liste les sessions sauvegardées pour ce projet
-- `/role use <nom>` — charge `roles/<nom>.md` (ou
-  `~/.localcoder/roles/<nom>.md`) et remplace le rôle actif
-- `/role list` — liste les rôles disponibles (projet + global)
-- `/role create <nom>` — écrit un nouveau rôle depuis l'interface (voir
-  "Créer un rôle ou un skill depuis l'interface")
-- `/role clear` — désactive le rôle courant
-- `/skill use <nom>` — active un skill ; contrairement au rôle, plusieurs
-  skills peuvent être actifs en même temps
-- `/skill list` — liste les skills disponibles (projet + global), marque
-  ceux actifs
-- `/skill create <nom>` — écrit un nouveau skill depuis l'interface, même
-  flux que `/role create`
-- `/skill clear` — désactive tous les skills actifs
-- `/context add <path|glob>` — ajoute un fichier, dossier ou pattern glob
-  au contexte pour le reste de la session
-- `/context list` — affiche le contexte actuellement chargé
-- `/context clear` — vide le contexte (indépendant de `/reset`)
-- `/context save <nom>` — sauvegarde les chemins/globs actuellement chargés
-  comme un jeu de contexte nommé, indépendant de `/session` (qui regroupe
-  contexte + rôle + skills + historique)
-- `/context load <nom>` — recharge un jeu de contexte sauvegardé, remplace
-  le contexte actuel
-- `/context sets` — liste les jeux de contexte sauvegardés pour ce projet
-- `/model use <nom>` — change de modèle pour le reste de la session
-- `/model list` — liste les modèles déjà pull dans Ollama (`/api/tags`)
-- `/set temperature <val>` — change la température pour le reste de la
+- `/index build [name] [model]` — (re)builds the semantic index; only
+  re-embeds files whose content changed since the last build. Without
+  arguments, rebuilds the active index using the config's `embed_model`. A
+  name lets you keep several indexes side by side (each with its own
+  file), e.g. to compare two embedding models; building an index makes it
+  active
+- `/index use <name>` — switches the active index to one already built
+- `/index list` — lists all indexes built for this project (model, number
+  of files/chunks, which one is active)
+- `/index status` — number of indexed files/chunks, model used, last build
+  date, for the active index
+- `/session save [name]` — names (if needed) and saves the current
+  session; without arguments, saves under the already-active name
+- `/session load <name>` — loads a saved session (history + role +
+  associated context), replaces the current state
+- `/session new <name>` — starts a blank session under this name
+- `/session list` — lists saved sessions for this project
+- `/role use <name>` — loads `roles/<name>.md` (or
+  `~/.localcoder/roles/<name>.md`) and replaces the active role
+- `/role list` — lists available roles (project + global)
+- `/role create <name>` — writes a new role from the interface (see
+  "Creating a role or skill from the interface")
+- `/role clear` — deactivates the current role
+- `/skill use <name>` — activates a skill; unlike a role, several skills
+  can be active at the same time
+- `/skill list` — lists available skills (project + global), marks which
+  are active
+- `/skill create <name>` — writes a new skill from the interface, same
+  flow as `/role create`
+- `/skill clear` — deactivates all active skills
+- `/context add <path|glob>` — adds a file, folder, or glob pattern to the
+  context for the rest of the session
+- `/context list` — shows the currently loaded context
+- `/context clear` — clears the context (independent of `/reset`)
+- `/context save <name>` — saves the currently loaded paths/globs as a
+  named context set, independent of `/session` (which groups context +
+  role + skills + history)
+- `/context load <name>` — reloads a saved context set, replaces the
+  current context
+- `/context sets` — lists context sets saved for this project
+- `/model use <name>` — changes the model for the rest of the session
+- `/model list` — lists models already pulled in Ollama (`/api/tags`)
+- `/set temperature <val>` — changes the temperature for the rest of the
   session
-- `/set num_ctx <val>` — change la taille de la fenêtre de contexte pour
-  le reste de la session
-- `/set max_subagents <val>` — change le nombre max de branches parallèles
-  pour `spawn_subagents` pour le reste de la session (défaut 4, voir
-  `--max-subagents` ; chaque branche est une conversation + requête Ollama
-  de plus en mémoire, à ajuster selon la RAM dispo)
-- `/stats` — résumé cumulé de la session (modèle, tours, tokens, temps
-  total, % de la fenêtre de contexte utilisé au dernier tour)
-- `/verbose` — active/désactive le détail par tour façon
-  `ollama run --verbose` (durées + débit prompt-eval/eval)
-- `/debug` — active/désactive la trace complète (traceback Python) sur les
-  erreurs, au lieu d'un message court ; utile pour comprendre pourquoi
-  quelque chose a vraiment échoué
-- `/socratic` — active/désactive le mode socratique : au lieu de donner
-  directement la réponse ou le code, le modèle guide avec des questions
-  et de petits indices, pour continuer à apprendre plutôt que juste copier
-- `/summary [fichier]` — demande un récapitulatif de la conversation ;
-  sans argument il s'affiche à l'écran, avec un chemin il est écrit dedans
-- `/search <motif>` — recherche directe dans le projet (texte/regex),
-  sans passer par le modèle
-- `/find <symbole>` — définition + références d'un symbole, en direct
-  (voir "Recherche par symboles")
-- `@chemin` dans un message normal — ajoute ce fichier/dossier au
-  contexte avant d'envoyer le message (raccourci pour `/context add`)
-- `/reset` — vide l'historique de conversation (garde rôle, skills et
-  contexte)
-- `/restart` — relance localcoder proprement : re-démarrage complet avec le
-  même dossier et les mêmes options (la session est autosauvegardée avant)
-- `/help` — affiche cette liste avec les descriptions
-- `/exit` — quitte
-- `Ctrl+C` — interrompt la génération en cours si le modèle est en train
-  de répondre (le tour est annulé, la session continue) ; à la ligne de
-  commande vide, `Ctrl+C` ou `Ctrl+D` quitte proprement
+- `/set num_ctx <val>` — changes the context window size for the rest of
+  the session
+- `/set max_subagents <val>` — changes the max number of parallel
+  branches for `spawn_subagents` for the rest of the session (default 4,
+  see `--max-subagents`; each branch is one more conversation + Ollama
+  request in memory, tune it to your available RAM)
+- `/stats` — cumulative session summary (model, turns, tokens, total time,
+  % of the context window used on the last turn)
+- `/verbose` — toggles per-turn detail à la `ollama run --verbose`
+  (durations + prompt-eval/eval throughput)
+- `/debug` — toggles full tracebacks (Python traceback) on errors instead
+  of a short message; useful for understanding why something actually
+  failed
+- `/socratic` — toggles socratic mode: instead of giving the answer or the
+  code directly, the model guides you with questions and small hints, so
+  you keep learning instead of just copying
+- `/summary [file]` — asks for a recap of the conversation; without
+  arguments it's shown on screen, with a path it's written there
+- `/search <pattern>` — direct search in the project (text/regex), without
+  going through the model
+- `/find <symbol>` — definition + references for a symbol, live (see
+  "Symbol search")
+- `@path` in a normal message — adds this file/folder to the context
+  before sending the message (shortcut for `/context add`)
+- `/reset` — clears the conversation history (keeps role, skills, and
+  context)
+- `/restart` — cleanly relaunches localcoder: a full restart with the same
+  folder and options (the session is auto-saved beforehand)
+- `/help` — shows this list with descriptions
+- `/exit` — quits
+- `Ctrl+C` — interrupts the current generation if the model is answering
+  (the turn is cancelled, the session continues); on an empty command
+  line, `Ctrl+C` or `Ctrl+D` exits cleanly
 
-### Interface plein écran
+### Full-screen interface
 
-Dans un vrai terminal (pas dans un pipe/script), localcoder s'ouvre en
-plein écran façon Vibe plutôt que d'imprimer du texte qui défile dans le
-terminal normal :
+In a real terminal (not a pipe/script), localcoder opens in full-screen,
+Vibe-style, rather than printing text that scrolls in the normal terminal:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  historique défilable (bannière, réponses, outils...)     │
+│  scrollable history (banner, responses, tools...)         │
 │  ...                                                       │
 ├──────────────────────────────────────────────────────────┤
-│  🐼 devstral-small-2 · role: tdd · context: 2 · ~1.2k/8k   │  ← barre de statut
+│  🐼 devstral-small-2 · role: tdd · context: 2 · ~1.2k/8k   │  ← status bar
 ├──────────────────────────────────────────────────────────┤
-│  you> _                                                     │  ← toujours en bas
+│  you> _                                                     │  ← always at the bottom
 └──────────────────────────────────────────────────────────┘
 ```
 
-- L'écran est effacé au lancement — la bannière (mascotte, modèle, rôle,
-  skills, contexte, commandes) s'affiche en haut de l'historique, pas
-  dans l'ancien contenu du terminal.
-- La ligne de saisie reste **toujours visible en bas de l'écran**, même
-  pendant que l'historique défile au-dessus — plus besoin de la
-  retrouver après une longue réponse. Elle occupe maintenant plusieurs
-  lignes de haut (3 à 8 selon ce qui est tapé) au lieu d'une seule ligne
-  serrée.
-- L'historique se scrolle avec **Page Haut / Page Bas** — testé de bout
-  en bout, y compris que la vue revient bien tout en bas dès qu'un
-  nouveau message arrive. La molette de la souris, elle, ne fait rien :
-  c'est volontaire, pour que le **copier-coller natif du terminal**
-  marche normalement (clic-glisser + Cmd/Ctrl+C comme d'habitude), sans
-  aucune touche à maintenir. C'est le compromis retenu après essai de
-  l'inverse (souris activée pour le scroll) : ça cassait la sélection de
-  texte, ce qui gênait plus que de perdre le scroll à la molette.
-- Chaque nouveau message que tu envoies est précédé d'une fine barre de
-  séparation, pour repérer un échange dans le défilement d'un coup d'œil.
-- Les réponses du modèle sont préfixées par **Lazzy>** (plus "assistant>")
-  et s'écrivent token par token sur une seule ligne qui s'enroule, comme
-  dans un vrai terminal.
-- Le code dans une réponse est mis en forme au fur et à mesure : un bloc
-  ```` ```...``` ```` reçoit son propre panneau (fond distinct), et le
-  `code entre backticks simples` ressort de la prose en couleur — plus
-  besoin de plisser les yeux pour repérer où le code commence et finit.
-- Pendant qu'Ollama réfléchit ou pendant le warm-up, la barre de statut
-  affiche un petit panda 🐼 qui roule dans une barre de progression
-  animée, à la place du statut habituel.
-- `Ctrl+C` interrompt vraiment une réponse en cours, même si Ollama est
-  en train de calculer et n'a encore rien renvoyé — avant, dans ce cas
-  précis, ça pouvait remonter une fausse "erreur timeout" au lieu
-  d'annuler proprement le tour.
-- Les commandes lentes (`/summary` notamment, qui interroge le modèle)
-  tournent maintenant en arrière-plan comme un vrai message : le spinner
-  continue de bouger et `Ctrl+C` les interrompt, au lieu de figer
-  l'interface jusqu'à la fin.
+- The screen is cleared on launch — the banner (mascot, model, role,
+  skills, context, commands) appears at the top of the history, not mixed
+  into old terminal content.
+- The input line stays **always visible at the bottom of the screen**,
+  even while the history scrolls above it — no more hunting for it after a
+  long response. It now spans multiple lines (3 to 8 depending on what's
+  typed) instead of a single cramped line.
+- The history scrolls with **Page Up / Page Down** — tested end to end,
+  including that the view correctly snaps back to the bottom as soon as a
+  new message arrives. The mouse wheel, on the other hand, does nothing:
+  that's intentional, so the terminal's **native copy-paste** keeps
+  working normally (click-drag + Cmd/Ctrl+C as usual), with no key to
+  hold. That's the trade-off kept after trying the opposite (mouse
+  enabled for scrolling): it broke text selection, which was more
+  annoying than losing wheel scroll.
+- Every new message you send is preceded by a thin separator line, so you
+  can spot an exchange at a glance while scrolling.
+- Model responses are prefixed with **Lazzy>** (instead of "assistant>")
+  and are written token by token on a single wrapping line, like in a real
+  terminal.
+- Code in a response is formatted as it streams in: a ` ```...``` ` block
+  gets its own panel (distinct background), and `code between single
+  backticks` stands out from the prose in color — no more squinting to
+  spot where code starts and ends.
+- While Ollama is thinking or during warm-up, the status bar shows a
+  little panda 🐼 rolling along an animated progress bar, in place of the
+  usual status.
+- `Ctrl+C` genuinely interrupts a response in progress, even while Ollama
+  is still computing and hasn't sent anything back yet — previously, in
+  that specific case, it could surface a false "timeout error" instead of
+  cleanly cancelling the turn.
+- Slow commands (`/summary` in particular, which queries the model) now
+  run in the background like a real message: the spinner keeps moving and
+  `Ctrl+C` interrupts them, instead of freezing the interface until they
+  finish.
 
-Taper `/` ouvre un menu **centré à l'écran, dans un cadre** (comme un
-panneau de settings classique), avec une vraie explication pour chaque
-commande (pas juste son nom) et une ligne de raccourcis en dessous :
+Typing `/` opens a menu **centered on screen, in a frame** (like a classic
+settings panel), with a real explanation for each command (not just its
+name) and a row of shortcuts below:
 
 ```
         ┌─ /role use ────────────────────────────────────────────┐
@@ -291,41 +282,40 @@ commande (pas juste son nom) et une ligne de raccourcis en dessous :
               ↑/↓ Move  PgUp/PgDn Page  Tab Complete  Enter Select  Esc Clear
 ```
 
-- **↑ / ↓** — déplace la sélection dans le menu. La fenêtre affichée suit
-  la sélection : quand tout ne tient pas dans le cadre, une ligne
-  `▲ N more above` / `▼ N more below` indique ce qui reste caché de chaque
-  côté — plus rien n'est hors de portée
-- **PgUp / PgDn** — quand le menu est ouvert, fait défiler la sélection
-  d'une page entière (pratique pour parcourir la trentaine de commandes) ;
-  dehors du menu, ils font défiler l'historique comme avant
-- **Tab** — complète la ligne avec l'item sélectionné **en entier** (sans
-  jamais valider) — pratique pour descendre dans `/role use `, `/context
-  add ` etc. sans perdre ce qui a déjà été tapé
-- **Entrée** — si un item du menu est en surbrillance, le sélectionne
-  (et l'exécute tout de suite s'il n'a besoin de rien d'autre) ; sinon
-  envoie la ligne telle quelle
-- **Échap** — vide la ligne (ferme le menu)
+- **↑ / ↓** — moves the selection in the menu. The displayed window
+  follows the selection: when everything doesn't fit in the frame, a
+  `▲ N more above` / `▼ N more below` line shows what's hidden on each
+  side — nothing is ever out of reach
+- **PgUp / PgDn** — when the menu is open, scrolls the selection a full
+  page at a time (handy for browsing the thirty-odd commands); outside the
+  menu, they scroll the history as before
+- **Tab** — completes the line with the selected item **in full** (never
+  submits) — handy for drilling into `/role use `, `/context add ` etc.
+  without losing what's already typed
+- **Enter** — if a menu item is highlighted, selects it (and runs it right
+  away if it needs nothing else); otherwise sends the line as-is
+- **Esc** — clears the line (closes the menu)
 
-Cinq commandes ont un sous-menu qui liste des valeurs réelles plutôt que
-du texte statique : `/role use` (rôles sur disque), `/skill use` (skills
-sur disque), `/session load` (sessions déjà sauvegardées), `/model use`
-(modèles déjà pull dans Ollama) et `/context add` — voir juste en dessous.
+Five commands have a submenu that lists real values instead of static
+text: `/role use` (roles on disk), `/skill use` (skills on disk),
+`/session load` (already-saved sessions), `/model use` (models already
+pulled in Ollama), and `/context add` — see right below.
 
-Sur une entrée non-interactive (script, pipe, tests), localcoder détecte
-l'absence de vrai TTY et repasse automatiquement sur le mode ligne par
-ligne classique (`input()`/`print()`, pas de plein écran) — rien ne
-change pour l'usage scripté ou pour la suite de tests.
+On non-interactive input (script, pipe, tests), localcoder detects the
+absence of a real TTY and automatically falls back to the classic
+line-by-line mode (`input()`/`print()`, no full screen) — nothing changes
+for scripted use or the test suite.
 
-Les descriptions longues du menu passent maintenant à la ligne au lieu
-d'être coupées en plein milieu d'un mot sur les terminaux étroits.
+Long menu descriptions now wrap to the next line instead of being cut off
+mid-word on narrow terminals.
 
-### Naviguer les fichiers pour `/context add`
+### Browsing files for `/context add`
 
-`/context add` a son propre mini-explorateur de fichiers dans le menu `/` :
-taper `/context add ` liste le contenu d'un dossier, un niveau à la fois —
-pas un gros dump à plat de tout le projet. Le point de départ est `src/`
-(ou `source/` si `src/` n'existe pas), pas la racine du projet, puisque
-c'est presque toujours là que se trouvent les fichiers pertinents :
+`/context add` has its own mini file explorer in the `/` menu: typing
+`/context add ` lists a folder's contents, one level at a time — not a
+flat dump of the whole project. The starting point is `src/` (or
+`source/` if `src/` doesn't exist), not the project root, since that's
+almost always where the relevant files are:
 
 ```
 you> /context add
@@ -334,105 +324,102 @@ you> /context add
               index.mjs
 ```
 
-Tab ou Entrée sur un dossier (il se termine par `/`) descend dedans sans
-rien valider ; sur un fichier, ça l'ajoute au contexte. `node_modules`,
-`.git` et les fichiers cachés sont exclus.
+Tab or Enter on a folder (it ends with `/`) descends into it without
+submitting; on a file, it adds it to the context. `node_modules`, `.git`,
+and hidden files are excluded.
 
-Le contexte n'est pas enfermé dans le projet courant — c'est volontaire,
-pour pouvoir piocher un fichier dans un projet voisin (un frontend et un
-backend développés côte à côte, par exemple) sans en faire une galère :
+The context isn't locked to the current project — that's intentional, so
+you can pull in a file from a neighboring project (a frontend and a
+backend developed side by side, for example) without a hassle:
 
-- Taper `../` remonte au-dessus de la racine du projet et continue à
-  naviguer dossier par dossier normalement à partir de là.
-- Taper un chemin absolu (`/Users/.../autre-projet/...`) ou commençant
-  par `~/` navigue n'importe où sur le disque, avec le même
-  Tab/aperçu de dossier.
+- Typing `../` goes above the project root and continues browsing
+  folder by folder normally from there.
+- Typing an absolute path (`/Users/.../other-project/...`) or one starting
+  with `~/` navigates anywhere on disk, with the same Tab/folder preview.
 
 ### Options
 
 ```bash
 localcoder --model devstral-small-2 --num-ctx 8192 --temperature 0.2
 localcoder --host http://localhost:11434
-localcoder --yolo   # auto-approuve write_file, edit_file et run_shell (à utiliser avec prudence)
-localcoder --context README.md --context src/auth   # répétable, fichier ou dossier
-localcoder --context "docs/adr/*.md"                # glob — charge le contenu de chaque fichier
+localcoder --yolo   # auto-approves write_file, edit_file and run_shell (use with caution)
+localcoder --context README.md --context src/auth   # repeatable, file or folder
+localcoder --context "docs/adr/*.md"                # glob — loads the content of every matching file
 localcoder --role code-review
-localcoder --session auth-bug --role code-review   # reprend/démarre le fil "auth-bug"
-localcoder --verbose         # ou -v : détail par tour dès le départ
-localcoder --no-warm-up      # saute le préchargement du modèle au démarrage
-localcoder --max-subagents 2 # limite les branches parallèles de spawn_subagents (défaut 4)
-# Mode dév : relance à chaque changement de fichier surveillé
+localcoder --session auth-bug --role code-review   # resumes/starts the "auth-bug" thread
+localcoder --verbose         # or -v: per-turn detail from the start
+localcoder --no-warm-up      # skips model preload on startup
+localcoder --max-subagents 2 # caps spawn_subagents' parallel branches (default 4)
+# Dev mode: restarts on every watched file change
 localcoder --watch
-localcoder --watch-path roles --watch-path tests/base.py   # surveille aussi ces chemins
+localcoder --watch-path roles --watch-path tests/base.py   # also watch these paths
 ```
 
-### Mode dév (`--watch`)
+### Dev mode (`--watch`)
 
-`--watch` lance le REPL dans un sous-processus et le **recharge tout seul
-dès qu'un fichier surveillé change** — l'équivalent d'un `--reload` de
-serveur pour cette interface interactive. Par défaut, les sources de
-`localcoder/`, `pyproject.toml` et `requirements.txt` sont surveillés :
-parfait pour développer localcoder lui-même.
+`--watch` runs the REPL in a subprocess and **reloads it automatically as
+soon as a watched file changes** — the equivalent of a server's
+`--reload` for this interactive interface. By default, the sources under
+`localcoder/`, `pyproject.toml`, and `requirements.txt` are watched:
+perfect for developing localcoder itself.
 
-- Le sous-processus garde le vrai terminal (stdin/stdout/stderr passés
-  tels quels) — l'interface plein écran fonctionne à l'identique.
-- `--watch-path <chemin>` (répétable) ajoute des chemins à surveiller :
-  fichiers ou dossiers.
-- Un fichier changé fait **relancer** la session en cours (la conversation
-  n'est pas sauvegardée automatiquement… sauf si elle est nommée via
-  `--session`, comme d'habitude).
-- Si le code écrit plante localcoder (ex. erreur de syntaxe en plein
-  développement), le watcher ne relance pas en boucle : il reste en vie et
-  relancera dès que tu corriges le fichier.
-- Quitter le REPL (`/exit`) quitte aussi le watcher.
+- The subprocess keeps the real terminal (stdin/stdout/stderr passed
+  through as-is) — the full-screen interface works identically.
+- `--watch-path <path>` (repeatable) adds paths to watch: files or
+  folders.
+- A changed file **restarts** the current session (the conversation isn't
+  auto-saved... unless it's named via `--session`, as usual).
+- If the code you just wrote crashes localcoder (e.g. a syntax error
+  mid-development), the watcher doesn't restart in a loop: it stays alive
+  and restarts as soon as you fix the file.
+- Quitting the REPL (`/exit`) also quits the watcher.
 
-Le plus simple pour l'utiliser : `./dev.sh` (voir « Utilisation ») — il crée
-`.venv/`, installe les dépendances et lance `--watch` automatiquement.
+The simplest way to use it: `./dev.sh` (see "Usage") — it creates
+`.venv/`, installs dependencies, and launches `--watch` automatically.
 
-### Contexte
+### Context
 
-`--context` (et `/context add` en session) accepte un fichier, un dossier
-ou un glob :
-- **Fichier** → lu en entier (tronqué à 6000 caractères) et injecté comme
-  message système, avant même ton premier message.
-- **Dossier** → transformé en arborescence (3 niveaux, `node_modules`/
-  `.git` etc. exclus).
-- **Glob** (`docs/adr/*.md`) — un seul `*` dans le dernier segment du
-  chemin, charge le contenu complet de chaque fichier qui matche.
+`--context` (and `/context add` in-session) accepts a file, a folder, or a
+glob:
+- **File** → read in full (truncated at 6000 characters) and injected as a
+  system message, before even your first message.
+- **Folder** → turned into a tree (3 levels, `node_modules`/`.git` etc.
+  excluded).
+- **Glob** (`docs/adr/*.md`) — a single `*` in the last path segment,
+  loads the full content of every matching file.
 
-C'est volontairement toi qui décides quoi charger — pas de scan
-automatique du projet entier.
+You deliberately decide what to load — no automatic scan of the whole
+project.
 
-### Rôles et skills
+### Roles and skills
 
-Un rôle est un simple fichier `.md`/`.txt` dans `roles/` (projet) ou
-`~/.localcoder/roles/` (global). Un seul rôle actif à la fois : `/role use
-tdd` remplace le rôle courant plutôt que de s'accumuler avec lui — c'est
-la "persona" de la session (revue de code, TDD, un stack particulier...).
+A role is a plain `.md`/`.txt` file in `roles/` (project) or
+`~/.localcoder/roles/` (global). Only one role active at a time: `/role
+use tdd` replaces the current role rather than stacking on top of it —
+it's the session's "persona" (code review, TDD, a particular stack...).
 
-Un skill est le même genre de fichier, dans `skills/` ou
-`~/.localcoder/skills/`, mais **plusieurs peuvent être actifs en même
-temps** : `/skill use write-tests` puis `/skill use commit-messages`
-activent les deux, chacun ajoute son propre contenu au contexte envoyé au
-modèle. Utile pour des consignes ponctuelles ("comment on écrit un test
-ici", "le format de nos messages de commit") qui n'ont pas besoin de
-remplacer toute la persona active.
+A skill is the same kind of file, in `skills/` or `~/.localcoder/skills/`,
+but **several can be active at the same time**: `/skill use write-tests`
+then `/skill use commit-messages` activates both, each adding its own
+content to the context sent to the model. Useful for one-off instructions
+("how we write a test here", "our commit message format") that don't need
+to replace the whole active persona.
 
-Trois exemples de rôles fournis dans `roles.example/` (`code-review`,
-`tdd`, `vue-quasar`) :
+Three example roles provided in `roles.example/` (`code-review`, `tdd`,
+`vue-quasar`):
 
 ```bash
 mkdir -p ~/.localcoder/roles
 cp roles.example/*.md ~/.localcoder/roles/
 ```
 
-### Créer un rôle ou un skill depuis l'interface
+### Creating a role or skill from the interface
 
-Pas besoin de sortir dans un éditeur : `/role create <nom>` (ou `/skill
-create <nom>`) bascule la ligne de saisie en mode capture — tape le
-contenu ligne par ligne, une ligne contenant juste `.` sauve le fichier
-dans `roles/<nom>.md` (ou `skills/<nom>.md`), une ligne contenant juste
-`!` annule sans rien écrire :
+No need to leave for an editor: `/role create <name>` (or `/skill create
+<name>`) switches the input line into capture mode — type the content
+line by line, a line with just `.` saves the file to `roles/<name>.md`
+(or `skills/<name>.md`), a line with just `!` cancels without writing
+anything:
 
 ```
 you> /role create pair-programmer
@@ -443,30 +430,30 @@ role> .
 [role] Saved "pair-programmer" to roles/pair-programmer.md.
 ```
 
-Ce flux marche à l'identique en mode non-interactif (script/pipe) — les
-mêmes lignes tapées une par une, dans l'ordre.
+This flow works identically in non-interactive mode (script/pipe) — the
+same lines typed one by one, in order.
 
 ### Sessions
 
-Une session = un fil de travail nommé avec son propre historique, son
-rôle et ses skills actifs, sauvegardé dans
-`.localcoder/sessions/<nom>.json` à la racine du projet.
+A session is a named thread of work with its own history, active role,
+and skills, saved to `.localcoder/sessions/<name>.json` at the project
+root.
 
 ```bash
 localcoder --session auth-bug --role code-review
-# ... tu discutes, corriges, etc. ...
-localcoder --session auth-bug   # reprend exactement où tu en étais
+# ... you chat, fix things, etc. ...
+localcoder --session auth-bug   # resumes exactly where you left off
 ```
 
-Nommer une session (`--session`, `/session new`, ou `/session save`)
-déclenche la sauvegarde automatique après chaque message — sans nom de
-session, rien n'est écrit sur disque.
+Naming a session (`--session`, `/session new`, or `/session save`)
+triggers automatic saving after every message — without a session name,
+nothing is written to disk.
 
 ```bash
 echo ".localcoder/" >> .gitignore
 ```
 
-### Recherche sémantique
+### Semantic search
 
 ```bash
 ollama pull nomic-embed-text
@@ -474,37 +461,37 @@ localcoder
 you> /index build
 ```
 
-`/index build` parcourt le projet, découpe chaque fichier en blocs
-d'environ 40 lignes et calcule un embedding par bloc via Ollama. Les
-fichiers inchangés depuis le dernier build ne sont pas ré-embeddés
-(comparaison par hash SHA1). L'index vit dans `.localcoder/index.json`.
+`/index build` walks the project, splits each file into chunks of about
+40 lines, and computes an embedding per chunk via Ollama. Files unchanged
+since the last build aren't re-embedded (compared by SHA1 hash). The index
+lives in `.localcoder/index.json`.
 
-Une fois l'index construit, le tool `semantic_search` apparaît
-automatiquement dans la liste envoyée au modèle.
+Once the index is built, the `semantic_search` tool automatically appears
+in the list sent to the model.
 
-### Recherche par symboles
+### Symbol search
 
 ```bash
 brew install universal-ctags
 ```
 
-**Important sur macOS** : le système fournit déjà un vieux `ctags` (BSD,
-`/usr/bin/ctags`) qui ne comprend pas les options modernes. Si après
-l'install Homebrew `ctags --version` n'affiche pas "Universal Ctags",
-c'est que le PATH pointe encore vers l'ancien.
+**Important on macOS**: the system already ships an old `ctags` (BSD,
+`/usr/bin/ctags`) that doesn't understand modern options. If after the
+Homebrew install `ctags --version` doesn't show "Universal Ctags", your
+PATH is still pointing at the old one.
 
-- **`find_definition`** — s'appuie sur Universal Ctags (parsing, pas du
-  texte brut) pour trouver la vraie définition d'un symbole.
-- **`find_references`** — grep à mots entiers (`\bsymbole\b`), sans faux
-  positifs style `add` dans `address`.
+- **`find_definition`** — relies on Universal Ctags (parsing, not raw
+  text) to find a symbol's actual definition.
+- **`find_references`** — whole-word grep (`\bsymbol\b`), no false
+  positives like `add` inside `address`.
 
-Les deux tools n'apparaissent que si Universal Ctags est détecté au
-démarrage. Aucun index à construire : `ctags` tourne à chaque appel.
+Both tools only appear if Universal Ctags is detected at startup. No
+index to build: `ctags` runs on every call.
 
-### Config persistante
+### Persistent config
 
-Au lieu de répéter les flags, crée `~/.localcoder.json` (global) ou
-`./localcoder.json` (projet) :
+Instead of repeating flags, create `~/.localcoder.json` (global) or
+`./localcoder.json` (project):
 
 ```json
 {
@@ -516,38 +503,37 @@ Au lieu de répéter les flags, crée `~/.localcoder.json` (global) ou
 }
 ```
 
-Ordre de priorité : flags CLI > `./localcoder.json` > `~/.localcoder.json`
-> défauts. `context` fait exception — les chemins des trois sources
-s'additionnent au lieu de s'écraser.
+Priority order: CLI flags > `./localcoder.json` > `~/.localcoder.json` >
+defaults. `context` is the exception — paths from all three sources are
+added together instead of overwriting each other.
 
-**Note** : les clés sont en `snake_case` (`num_ctx`, `auto_approve`,
-`embed_model`) contrairement à la version Node (`numCtx`, `autoApprove`,
-`embedModel`) — les deux versions ne partagent ni fichiers de config ni
-fichiers de session, c'est une réécriture, pas un fork binaire compatible.
+**Note**: keys are `snake_case` (`num_ctx`, `auto_approve`,
+`embed_model`) unlike the Node version (`numCtx`, `autoApprove`,
+`embedModel`) — the two versions share neither config files nor session
+files; this is a rewrite, not a binary-compatible fork.
 
 ### Warm-up
 
-Au démarrage, avant même d'afficher la ligne de saisie, localcoder envoie
-un appel `/api/generate` sans prompt à Ollama (juste `keep_alive`) — la
-façon documentée de précharger un modèle en mémoire sans rien générer.
-Le but : que le premier vrai message ne paie pas le coût du chargement du
-modèle. Si Ollama ne répond pas, un avertissement s'affiche et le warm-up
-est simplement sauté — ça ne bloque jamais le démarrage. Désactivable avec
-`--no-warm-up`.
+On startup, before even showing the input line, localcoder sends a
+prompt-less `/api/generate` call to Ollama (just `keep_alive`) — the
+documented way to preload a model into memory without generating
+anything. The goal: your first real message doesn't pay the model's load
+cost. If Ollama doesn't respond, a warning is shown and warm-up is simply
+skipped — it never blocks startup. Disable with `--no-warm-up`.
 
-### Stats et mode verbeux
+### Stats and verbose mode
 
-- `/stats` donne un résumé cumulé de la session courante (modèle,
-  `num_ctx`, température, nombre de tours, tokens de prompt/réponse
-  cumulés, temps total de génération, et la part de la fenêtre de
-  contexte utilisée au dernier tour).
-- `/verbose` (ou `--verbose`/`-v` au lancement) affiche après chaque
-  réponse un détail façon `ollama run --verbose` : durée totale, durée de
-  chargement, nombre/durée/débit du prompt-eval, nombre/durée/débit de
-  l'eval — construit directement à partir des métadonnées que renvoie
-  Ollama sur le chunk final du stream.
+- `/stats` gives a cumulative summary of the current session (model,
+  `num_ctx`, temperature, number of turns, cumulative prompt/response
+  tokens, total generation time, and the share of the context window used
+  on the last turn).
+- `/verbose` (or `--verbose`/`-v` at launch) shows, after each response,
+  detail à la `ollama run --verbose`: total duration, load duration,
+  prompt-eval count/duration/throughput, eval count/duration/throughput —
+  built directly from the metadata Ollama returns on the stream's final
+  chunk.
 
-### Changer de modèle ou de réglages en session
+### Switching model or settings mid-session
 
 ```
 you> /model list
@@ -558,61 +544,58 @@ you> /set temperature 0.4
 you> /set num_ctx 16384
 ```
 
-Ces changements ne s'appliquent qu'à la session en cours (pas de fichier
-de config modifié) et prennent effet dès le tour suivant.
+These changes only apply to the current session (no config file is
+modified) and take effect from the next turn.
 
-Certains modèles (souvent les modèles "chat-only", ex. `deepseek-coder:33b`)
-refusent purement et simplement les requêtes qui contiennent des tools.
-Dans ce cas, localcoder ne plante pas le tour : il prévient une seule fois
-(`... ne supporte pas les tool-calls — on continue sans tools pour ce
-modèle`) puis continue la conversation normalement, juste sans lecture/
-écriture de fichiers, recherche, etc. pendant qu'il reste actif. Un
-`/model use` vers un autre modèle réactive les tools automatiquement.
+Some models (often "chat-only" models, e.g. `deepseek-coder:33b`) flatly
+refuse requests that contain tools. In that case, localcoder doesn't
+crash the turn: it warns once (`... doesn't support tool calls — continuing
+without tools for this model`) then continues the conversation normally,
+just without file reading/writing, search, etc. while it stays active. A
+`/model use` to another model re-enables tools automatically.
 
-### Récap de conversation
+### Conversation recap
 
 ```
 you> /summary
 you> /summary notes/recap.md
 ```
 
-Demande au modèle un résumé de ce qui a été fait/décidé jusqu'ici — utile
-avant de fermer un fil ou de passer à quelqu'un d'autre. Sans argument, le
-texte s'affiche ; avec un chemin, il est écrit dans ce fichier (créé si
-besoin) au lieu de s'afficher.
+Asks the model for a summary of what's been done/decided so far — useful
+before closing a thread or handing it off to someone else. Without
+arguments, the text is shown on screen; with a path, it's written to that
+file (created if needed) instead of being displayed.
 
-### Recherche directe (`/search`, `/find`)
+### Direct search (`/search`, `/find`)
 
-Contrairement aux tools `search_code`/`find_definition`/`find_references`
-que le *modèle* utilise pendant un tour, `/search` et `/find` sont pour
-*toi* : une réponse immédiate, sans aller-retour vers Ollama.
+Unlike the `search_code`/`find_definition`/`find_references` tools that
+the *model* uses during a turn, `/search` and `/find` are for *you*: an
+immediate answer, with no round-trip to Ollama.
 
 ```
 you> /search TODO
 you> /find handleSubmit
 ```
 
-`/find` réutilise les mêmes tools que le modèle (Universal Ctags pour la
-définition, grep à mots entiers pour les références) — même limitation :
-n'apparaît utile que si Universal Ctags est installé (voir plus bas).
+`/find` reuses the same tools as the model (Universal Ctags for the
+definition, whole-word grep for references) — same limitation: only
+useful if Universal Ctags is installed (see above).
 
-Ni `/search` ni `/find` n'ont besoin de `/context` : les deux fouillent
-tout le projet directement sur disque, indépendamment de ce qui a été
-ajouté au contexte (le contexte, lui, sert seulement à ce qui est envoyé
-au modèle). `/find` veut un **identifiant exact** (`add`, `handleSubmit`)
-et non une description (`/find une fonction qui additionne` ne
-trouvera jamais rien, puisqu'aucun symbole ne s'appelle littéralement
-comme ça) — pour une recherche en langage libre ou par motif, `/search`
-est le bon outil.
+Neither `/search` nor `/find` needs `/context`: both search the whole
+project directly on disk, independently of what's been added to the
+context (context, for its part, only affects what's sent to the model).
+`/find` wants an **exact identifier** (`add`, `handleSubmit`), not a
+description (`/find a function that adds numbers` will never find
+anything, since no symbol is literally named that) — for free-language or
+pattern search, `/search` is the right tool.
 
-`/search` reste malgré tout une recherche texte/regex **exacte** : si tu
-tapes une description plutôt que les mots réellement présents dans le
-code (`/search une fonction qui additionne deux nombres`), il n'y a
-souvent rien à trouver littéralement. Dans ce cas, si un index a été
-construit (`/index build`), `/search` retente automatiquement une
-recherche par sens (la même que `semantic_search` utilise pour le
-modèle) avant d'abandonner — sans index, il te le signale et te propose
-de lancer `/index build`.
+`/search` remains, nonetheless, an **exact** text/regex search: if you
+type a description rather than words actually present in the code
+(`/search a function that adds two numbers`), there's often nothing to
+find literally. In that case, if an index has been built (`/index
+build`), `/search` automatically retries a search by meaning (the same
+one `semantic_search` uses for the model) before giving up — without an
+index, it tells you so and suggests running `/index build`.
 
 ## Tests
 
@@ -621,25 +604,24 @@ pip install pytest
 pytest
 ```
 
-Suite complète : logique pure (config, contexte, rôles, skills, sessions,
-menu, navigation de fichiers pour `/context add`, index sémantique) +
-tools + recherche par symboles contre un vrai binaire Universal Ctags +
-client Ollama (chat streamé, annulation via `cancel_event`, warm-up, liste
-des modèles) + la mécanique de l'interface plein écran hors rendu (calcul
-du menu, mise en cache, machine à états de la ligne de saisie,
-`BufferSink` → transcript, routage `submit_line`) + bout-en-bout contre un
-faux serveur Ollama (streaming NDJSON, tool calls, flux de confirmation,
-sessions persistées entre deux lancements, warm-up au démarrage, `/model`,
-`/set`, `/stats`, `/verbose`, `/summary`, `/search`, `/find`, mentions
-`@chemin`, création de rôle/skill depuis l'interface).
+Full suite: pure logic (config, context, roles, skills, sessions, menu,
+file browsing for `/context add`, semantic index) + tools + symbol search
+against a real Universal Ctags binary + Ollama client (streamed chat,
+cancellation via `cancel_event`, warm-up, model listing) + the full-screen
+interface's mechanics outside of rendering (menu computation, caching, the
+input line's state machine, `BufferSink` → transcript, `submit_line`
+routing) + end-to-end against a fake Ollama server (NDJSON streaming, tool
+calls, confirmation flow, sessions persisted across two runs, warm-up on
+startup, `/model`, `/set`, `/stats`, `/verbose`, `/summary`, `/search`,
+`/find`, `@path` mentions, role/skill creation from the interface).
 
-Le rendu à l'écran de l'interface plein écran (mise en page, animation du
-spinner, Page Haut/Page Bas, disposition centrée du menu) n'est pas
-couvert par la suite automatisée — ça nécessite un vrai TTY, ce que
-l'environnement de test n'a pas. Il a été vérifié manuellement avec un
-vrai pseudo-terminal (`pty.fork()`, comme pour Ctrl+C) : démarrage,
-warm-up avec spinner, aller-retour de conversation, ouverture du menu,
-Tab qui complète le texte en entier, et Ctrl+C qui annule un tour sans
-tuer l'application — mais ça reste une vérification manuelle, pas un test
-qui tourne en CI. Toute la logique en dessous du rendu (`tests/test_menu.py`,
-`tests/test_fullscreen.py`, `tests/test_browse.py`) est testée à fond.
+The full-screen interface's on-screen rendering (layout, spinner
+animation, Page Up/Page Down, centered menu layout) isn't covered by the
+automated suite — that requires a real TTY, which the test environment
+doesn't have. It has been verified manually with a real pseudo-terminal
+(`pty.fork()`, as for Ctrl+C): startup, warm-up with spinner, conversation
+round-trips, opening the menu, Tab completing text in full, and Ctrl+C
+cancelling a turn without killing the app — but that remains a manual
+check, not a test that runs in CI. All the logic beneath the rendering
+(`tests/test_menu.py`, `tests/test_fullscreen.py`, `tests/test_browse.py`)
+is thoroughly tested.
