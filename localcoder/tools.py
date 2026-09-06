@@ -261,6 +261,31 @@ BASE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_subagents",
+            "description": (
+                "Like spawn_subagent, but splits several INDEPENDENT investigation tasks across parallel "
+                "sub-agents at once instead of one at a time — use this when a task naturally breaks into "
+                "parts that don't depend on each other's findings (e.g. investigate module A and module B "
+                "separately), since running them concurrently is faster than one after another. You get back "
+                "every branch's own answer (or error) to synthesize into one final answer yourself. Each "
+                "sub-agent is read-only and has no access to the others' findings while running."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Two or more self-contained, independent task descriptions — one per parallel sub-agent.",
+                    }
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
 ]
 
 SEMANTIC_SEARCH_TOOL = {
@@ -469,5 +494,10 @@ def execute_tool(name: str, args: dict, ctx: dict) -> dict:
         from localcoder.subagent import run_subagent  # lazy: subagent.py imports from this module
 
         return run_subagent(args["task"], ctx, cancel_event=ctx.get("cancel_event"))
+
+    if name == "spawn_subagents":
+        from localcoder.subagent import run_subagents  # lazy: subagent.py imports from this module
+
+        return run_subagents(args["tasks"], ctx, cancel_event=ctx.get("cancel_event"))
 
     return {"error": f"Unknown tool: {name}"}

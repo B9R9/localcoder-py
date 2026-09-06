@@ -23,14 +23,22 @@ Ce que ça fait :
   (si Universal Ctags est installé). Chaque tool optionnel n'apparaît dans
   la liste envoyée au modèle que si sa dépendance est réellement là —
   sinon zéro coût en tokens.
-- `spawn_subagent` : délègue une tâche d'investigation autonome (repérer comment
-  quelque chose fonctionne dans une grosse zone du code, par exemple) à un
-  sous-agent — même endpoint/modèle Ollama, mais conversation et fenêtre de
-  contexte propres. Le modèle principal ne récupère que la réponse finale du
-  sous-agent, pas ses appels d'outils intermédiaires, ce qui évite de saturer
-  son propre contexte sur une recherche large. Le sous-agent est en lecture
-  seule (pas d'écriture de fichier, pas de `run_shell`) puisqu'il tourne sans
-  personne pour approuver une action pendant son exécution.
+- Deux tools de délégation à des sous-agents, même endpoint/modèle Ollama que
+  la conversation principale mais chacun avec sa propre fenêtre de contexte
+  jetable — le modèle principal ne récupère que leur réponse finale, jamais
+  leurs appels d'outils intermédiaires, pour ne pas saturer son propre
+  contexte sur une recherche large. Les deux sont en lecture seule (pas
+  d'écriture de fichier, pas de `run_shell`) puisqu'ils tournent sans
+  personne pour approuver une action pendant leur exécution :
+    - `spawn_subagent` (mode **loop**) — une tâche d'investigation à la
+      fois, séquentielle : repérer comment quelque chose fonctionne dans
+      une zone du code, par exemple.
+    - `spawn_subagents` (mode **graph**) — plusieurs tâches indépendantes à
+      la fois, en parallèle (4 branches max), quand le travail se découpe
+      naturellement en parties qui ne dépendent pas les unes des autres
+      (ex. investiguer le module A et le module B séparément) ; chaque
+      branche renvoie sa propre réponse, et c'est au modèle principal de
+      les recomposer en une réponse finale.
 - `search_code` utilise `ripgrep` s'il est installé, sinon `grep` en repli.
 - `edit_file` fait un remplacement ciblé (ancien texte → nouveau texte,
   doit matcher exactement une fois) plutôt que de réécrire tout le fichier.

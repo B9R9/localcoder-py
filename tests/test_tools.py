@@ -239,6 +239,7 @@ def test_get_tools_no_index_no_ctags(tmp_path, monkeypatch):
         "get_background_output",
         "stop_background_task",
         "spawn_subagent",
+        "spawn_subagents",
     ]
 
 
